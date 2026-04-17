@@ -18,8 +18,12 @@ namespace Localsend.Backend.Discovery
 
     /// <summary>
     /// UDP 多播发现：周期性 announce；收到他人 announce 时回复一条非 announcement 响应。
-    /// 接收端与发送端共用一个 socket（加入多播组、允许回送给自身则忽略自身指纹）。
-    /// 本类对每一个收发环节打印详细日志，便于真机抓因诊断。
+    ///
+    /// 设计：
+    /// - 单 socket 绑定在 *:53317 上接收；
+    /// - 每次发 announce 前重新枚举本机 IPv4（新增/消失的接口自动加入/退出组），
+    ///   然后遍历所有已加入的接口，每个接口各发一份（通过切换 IP_MULTICAST_IF）。
+    /// - 不做"主接口固定"，DHCP 换地址、拔插网卡、切 Wi-Fi 都能自收敛。
     /// </summary>
     internal sealed class MulticastDiscovery : IDisposable
     {
@@ -30,6 +34,8 @@ namespace Localsend.Backend.Discovery
         private Thread _rxThread;
         private Timer _announceTimer;
         private volatile bool _running;
+
+        private readonly object _sendLock = new object();
         private readonly List<IPAddress> _joinedIfaces = new List<IPAddress>();
 
         public event EventHandler<PeerDiscoveredEventArgs> PeerDiscovered;
@@ -46,18 +52,6 @@ namespace Localsend.Backend.Discovery
             if (_running) return;
             _running = true;
 
-            // 1) 列出本机所有 IPv4 地址，方便核对是否在同一子网
-            List<IPAddress> locals = GetLocalIPv4Addresses();
-            if (locals.Count == 0)
-                Log.Warn("No local IPv4 addresses found (DNS lookup returned nothing)");
-            else
-            {
-                StringBuilder sb = new StringBuilder();
-                for (int i = 0; i < locals.Count; i++) { if (i > 0) sb.Append(", "); sb.Append(locals[i]); }
-                Log.Info("Local IPv4 addresses: " + sb);
-            }
-
-            // 2) 绑定 UDP 端口
             try
             {
                 _client = new UdpClient(_port);
@@ -70,7 +64,6 @@ namespace Localsend.Backend.Discovery
                 return;
             }
 
-            // 3) 设置 TTL / loopback（WM6 默认值不确定，显式设置更稳）
             try
             {
                 _client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 4);
@@ -78,51 +71,13 @@ namespace Localsend.Backend.Discovery
             }
             catch (Exception ex) { Log.Warn("Set MulticastTimeToLive failed: " + ex.Message); }
 
-            // WM6 SChannel 不支持 MulticastLoopback 选项（返回 WSAENOPROTOOPT），但 loopback 默认已开启，
-            // 这里尝试设置一次；失败只在 Debug 输出、不再 Warn 避免噪声。
+            // WM6 SChannel 不支持 MulticastLoopback 选项（WSAENOPROTOOPT），
+            // 但 loopback 默认开启，这里静默尝试即可。
             try { _client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastLoopback, true); }
             catch { }
 
-            // 4) 在每个可用 IPv4 接口上加入多播组；失败不致命
-            bool anyJoined = false;
-            IPAddress primary = null;
-            for (int i = 0; i < locals.Count; i++)
-            {
-                IPAddress a = locals[i];
-                if (IsLoopback(a) || IsLinkLocal(a)) continue;
-                try
-                {
-                    _client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.AddMembership,
-                        new MulticastOption(_group, a));
-                    _joinedIfaces.Add(a);
-                    if (primary == null) primary = a;
-                    anyJoined = true;
-                    Log.Info("Joined multicast " + _group + " on iface " + a);
-                }
-                catch (Exception ex) { Log.Warn("JoinMulticastGroup on " + a + " failed: " + ex.Message); }
-            }
-            if (!anyJoined)
-            {
-                // 回退到默认接口
-                try
-                {
-                    _client.JoinMulticastGroup(_group);
-                    Log.Info("Joined multicast " + _group + " on default iface");
-                }
-                catch (Exception ex) { Log.Warn("JoinMulticastGroup (default) failed: " + ex.Message); }
-            }
-
-            // 5) 关键：显式指定出接口，避免 WM6 默认把多播送到 169.254.* 链路本地口
-            if (primary != null)
-            {
-                try
-                {
-                    _client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastInterface,
-                        primary.GetAddressBytes());
-                    Log.Info("Multicast outgoing interface pinned to " + primary);
-                }
-                catch (Exception ex) { Log.Warn("Set MulticastInterface failed: " + ex.Message); }
-            }
+            // 首次同步接口列表（加入组）
+            RefreshInterfaces();
 
             _rxThread = new Thread(RxLoop);
             _rxThread.IsBackground = true;
@@ -146,14 +101,79 @@ namespace Localsend.Backend.Discovery
             if (_announceTimer != null) { _announceTimer.Dispose(); _announceTimer = null; }
             if (_client != null)
             {
-                try { _client.DropMulticastGroup(_group); } catch { }
+                lock (_sendLock)
+                {
+                    for (int i = 0; i < _joinedIfaces.Count; i++)
+                    {
+                        try
+                        {
+                            _client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.DropMembership,
+                                new MulticastOption(_group, _joinedIfaces[i]));
+                        }
+                        catch { }
+                    }
+                    _joinedIfaces.Clear();
+                }
                 try { _client.Close(); } catch { }
                 _client = null;
             }
-            _joinedIfaces.Clear();
         }
 
         public void Dispose() { Stop(); }
+
+        /// <summary>
+        /// 重新枚举本机可用 IPv4 地址，同步多播组成员关系：
+        /// 新出现的接口 AddMembership，已消失的接口 DropMembership。
+        /// </summary>
+        private void RefreshInterfaces()
+        {
+            if (_client == null) return;
+
+            List<IPAddress> current = GetLocalIPv4Addresses();
+            List<IPAddress> usable = new List<IPAddress>();
+            for (int i = 0; i < current.Count; i++)
+            {
+                IPAddress a = current[i];
+                if (IsLoopback(a) || IsLinkLocal(a)) continue;
+                usable.Add(a);
+            }
+
+            lock (_sendLock)
+            {
+                // 退出已消失的接口
+                List<IPAddress> toDrop = new List<IPAddress>();
+                for (int i = 0; i < _joinedIfaces.Count; i++)
+                    if (!ContainsAddr(usable, _joinedIfaces[i])) toDrop.Add(_joinedIfaces[i]);
+
+                for (int i = 0; i < toDrop.Count; i++)
+                {
+                    IPAddress a = toDrop[i];
+                    try
+                    {
+                        _client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.DropMembership,
+                            new MulticastOption(_group, a));
+                        Log.Info("Dropped multicast on iface " + a);
+                    }
+                    catch (Exception ex) { Log.Warn("Drop on " + a + " failed: " + ex.Message); }
+                    RemoveAddr(_joinedIfaces, a);
+                }
+
+                // 加入新出现的接口
+                for (int i = 0; i < usable.Count; i++)
+                {
+                    IPAddress a = usable[i];
+                    if (ContainsAddr(_joinedIfaces, a)) continue;
+                    try
+                    {
+                        _client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.AddMembership,
+                            new MulticastOption(_group, a));
+                        _joinedIfaces.Add(a);
+                        Log.Info("Joined multicast " + _group + " on iface " + a);
+                    }
+                    catch (Exception ex) { Log.Warn("Join on " + a + " failed: " + ex.Message); }
+                }
+            }
+        }
 
         private void RxLoop()
         {
@@ -171,7 +191,6 @@ namespace Localsend.Backend.Discovery
                 }
                 catch (ObjectDisposedException) { break; }
 
-                // 每条入站包先打日志，再尝试解析
                 string preview = SafePreview(data);
                 Log.Info("RX " + data.Length + "B from " + remote + " : " + preview);
 
@@ -223,41 +242,73 @@ namespace Localsend.Backend.Discovery
                 reply.Info = _self;
                 reply.Announcement = false;
                 byte[] payload = Encoding.UTF8.GetBytes(Json.Stringify(reply.ToJson()));
-                // 回复使用单播更精准；同时也多播一份兼容各种实现
+                // 单播回复：OS 路由即可，不需要切换 MulticastInterface
                 try
                 {
-                    int n = _client.Send(payload, payload.Length, new IPEndPoint(from.Address, _port));
+                    int n;
+                    lock (_sendLock) n = _client.Send(payload, payload.Length, new IPEndPoint(from.Address, _port));
                     Log.Info("TX reply unicast " + n + "B to " + from.Address + ":" + _port);
                 }
                 catch (Exception ex) { Log.Warn("Announce reply (unicast) failed: " + ex.Message); }
-                try
-                {
-                    int n = _client.Send(payload, payload.Length, new IPEndPoint(_group, _port));
-                    Log.Info("TX reply multicast " + n + "B to " + _group + ":" + _port);
-                }
-                catch (Exception ex) { Log.Warn("Announce reply (multicast) failed: " + ex.Message); }
+                // 多播回复在每个接口上各发一份
+                SendMulticastOnAllInterfaces(payload, "reply");
             }
         }
 
         private void SendAnnounce(bool announcement)
         {
             if (_client == null) return;
+
+            // 每次发送前重新同步接口（DHCP/网卡变化自收敛）
+            try { RefreshInterfaces(); } catch (Exception ex) { Log.Warn("RefreshInterfaces threw: " + ex.Message); }
+
             AnnounceMessage m = new AnnounceMessage();
             m.Info = _self;
             m.Announcement = announcement;
             string json = Json.Stringify(m.ToJson());
             byte[] payload = Encoding.UTF8.GetBytes(json);
-            try
-            {
-                int n = _client.Send(payload, payload.Length, new IPEndPoint(_group, _port));
-                Log.Info("TX announce(" + announcement + ") " + n + "B to " + _group + ":" + _port
-                    + " payload=" + json);
-            }
-            catch (Exception ex) { Log.Warn("Announce send failed: " + ex.Message); }
+
+            SendMulticastOnAllInterfaces(payload, "announce(" + announcement + ")");
         }
 
         /// <summary>
-        /// 绕开多播，直接向目标 IP 发一条 announcement 单播。用于验证链路是否连通（如路由器 AP 隔离）。
+        /// 对每个已加入的接口切换 IP_MULTICAST_IF 后发送一次；没有任何接口时回退到默认接口一次。
+        /// </summary>
+        private void SendMulticastOnAllInterfaces(byte[] payload, string tag)
+        {
+            if (_client == null) return;
+            IPEndPoint dst = new IPEndPoint(_group, _port);
+
+            lock (_sendLock)
+            {
+                if (_joinedIfaces.Count == 0)
+                {
+                    try
+                    {
+                        int n = _client.Send(payload, payload.Length, dst);
+                        Log.Info("TX " + tag + " (default iface) " + n + "B to " + _group + ":" + _port);
+                    }
+                    catch (Exception ex) { Log.Warn("TX " + tag + " (default) failed: " + ex.Message); }
+                    return;
+                }
+
+                for (int i = 0; i < _joinedIfaces.Count; i++)
+                {
+                    IPAddress iface = _joinedIfaces[i];
+                    try
+                    {
+                        _client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastInterface,
+                            iface.GetAddressBytes());
+                        int n = _client.Send(payload, payload.Length, dst);
+                        Log.Info("TX " + tag + " via " + iface + " " + n + "B");
+                    }
+                    catch (Exception ex) { Log.Warn("TX " + tag + " via " + iface + " failed: " + ex.Message); }
+                }
+            }
+        }
+
+        /// <summary>
+        /// 绕开多播，直接向目标 IP 发一条 announcement 单播。用于手动探测（AP 隔离、路由器多播策略等）。
         /// </summary>
         public void SendUnicastAnnounce(IPAddress target)
         {
@@ -268,7 +319,8 @@ namespace Localsend.Backend.Discovery
             byte[] payload = Encoding.UTF8.GetBytes(Json.Stringify(m.ToJson()));
             try
             {
-                int n = _client.Send(payload, payload.Length, new IPEndPoint(target, _port));
+                int n;
+                lock (_sendLock) n = _client.Send(payload, payload.Length, new IPEndPoint(target, _port));
                 Log.Info("TX unicast probe " + n + "B to " + target + ":" + _port);
             }
             catch (Exception ex) { Log.Warn("Unicast probe send failed: " + ex.Message); }
@@ -295,6 +347,17 @@ namespace Localsend.Backend.Discovery
             return r;
         }
 
+        private static bool ContainsAddr(List<IPAddress> list, IPAddress a)
+        {
+            for (int i = 0; i < list.Count; i++) if (list[i].Equals(a)) return true;
+            return false;
+        }
+
+        private static void RemoveAddr(List<IPAddress> list, IPAddress a)
+        {
+            for (int i = 0; i < list.Count; i++) if (list[i].Equals(a)) { list.RemoveAt(i); return; }
+        }
+
         private static bool IsLoopback(IPAddress a)
         {
             byte[] b = a.GetAddressBytes();
@@ -313,7 +376,6 @@ namespace Localsend.Backend.Discovery
             try
             {
                 string s = Encoding.UTF8.GetString(data, 0, n);
-                // 替换控制字符以免破坏日志行
                 StringBuilder sb = new StringBuilder(s.Length);
                 for (int i = 0; i < s.Length; i++)
                 {
