@@ -93,7 +93,8 @@ namespace Localsend.Backend.Discovery
                 if (IsLoopback(a) || IsLinkLocal(a)) continue;
                 try
                 {
-                    _client.JoinMulticastGroup(_group, a);
+                    _client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.AddMembership,
+                        new MulticastOption(_group, a));
                     _joinedIfaces.Add(a);
                     anyJoined = true;
                     Log.Info("Joined multicast " + _group + " on iface " + a);
