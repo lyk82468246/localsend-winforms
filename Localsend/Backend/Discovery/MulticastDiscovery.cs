@@ -78,15 +78,14 @@ namespace Localsend.Backend.Discovery
             }
             catch (Exception ex) { Log.Warn("Set MulticastTimeToLive failed: " + ex.Message); }
 
-            try
-            {
-                _client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastLoopback, true);
-                Log.Info("Multicast loopback enabled");
-            }
-            catch (Exception ex) { Log.Warn("Set MulticastLoopback failed: " + ex.Message); }
+            // WM6 SChannel 不支持 MulticastLoopback 选项（返回 WSAENOPROTOOPT），但 loopback 默认已开启，
+            // 这里尝试设置一次；失败只在 Debug 输出、不再 Warn 避免噪声。
+            try { _client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastLoopback, true); }
+            catch { }
 
             // 4) 在每个可用 IPv4 接口上加入多播组；失败不致命
             bool anyJoined = false;
+            IPAddress primary = null;
             for (int i = 0; i < locals.Count; i++)
             {
                 IPAddress a = locals[i];
@@ -96,6 +95,7 @@ namespace Localsend.Backend.Discovery
                     _client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.AddMembership,
                         new MulticastOption(_group, a));
                     _joinedIfaces.Add(a);
+                    if (primary == null) primary = a;
                     anyJoined = true;
                     Log.Info("Joined multicast " + _group + " on iface " + a);
                 }
@@ -110,6 +110,18 @@ namespace Localsend.Backend.Discovery
                     Log.Info("Joined multicast " + _group + " on default iface");
                 }
                 catch (Exception ex) { Log.Warn("JoinMulticastGroup (default) failed: " + ex.Message); }
+            }
+
+            // 5) 关键：显式指定出接口，避免 WM6 默认把多播送到 169.254.* 链路本地口
+            if (primary != null)
+            {
+                try
+                {
+                    _client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastInterface,
+                        primary.GetAddressBytes());
+                    Log.Info("Multicast outgoing interface pinned to " + primary);
+                }
+                catch (Exception ex) { Log.Warn("Set MulticastInterface failed: " + ex.Message); }
             }
 
             _rxThread = new Thread(RxLoop);
@@ -242,6 +254,24 @@ namespace Localsend.Backend.Discovery
                     + " payload=" + json);
             }
             catch (Exception ex) { Log.Warn("Announce send failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// 绕开多播，直接向目标 IP 发一条 announcement 单播。用于验证链路是否连通（如路由器 AP 隔离）。
+        /// </summary>
+        public void SendUnicastAnnounce(IPAddress target)
+        {
+            if (_client == null || target == null) return;
+            AnnounceMessage m = new AnnounceMessage();
+            m.Info = _self;
+            m.Announcement = true;
+            byte[] payload = Encoding.UTF8.GetBytes(Json.Stringify(m.ToJson()));
+            try
+            {
+                int n = _client.Send(payload, payload.Length, new IPEndPoint(target, _port));
+                Log.Info("TX unicast probe " + n + "B to " + target + ":" + _port);
+            }
+            catch (Exception ex) { Log.Warn("Unicast probe send failed: " + ex.Message); }
         }
 
         // ---- helpers ----

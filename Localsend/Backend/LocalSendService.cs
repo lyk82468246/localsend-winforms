@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Net;
+using System.Text;
 using System.Threading;
 using Localsend.Backend.Discovery;
 using Localsend.Backend.Http;
@@ -82,5 +84,49 @@ namespace Localsend.Backend
         }
 
         public void Dispose() { Stop(); }
+
+        /// <summary>
+        /// 手动探测目标 IP：
+        /// 1) 发一条单播 UDP announce（绕开多播，验证 L3 连通并让对方看到我们）
+        /// 2) HTTP GET /api/localsend/v1/info（验证 TCP/HTTP 连通、并读回对方 DeviceInfo）
+        /// </summary>
+        public void Probe(IPAddress target)
+        {
+            if (target == null) return;
+            Log.Info("Probe start -> " + target);
+            try { _discovery.SendUnicastAnnounce(target); }
+            catch (Exception ex) { Log.Warn("Probe unicast announce threw: " + ex.Message); }
+
+            ThreadPool.QueueUserWorkItem(delegate { ProbeHttp(target); });
+        }
+
+        private void ProbeHttp(IPAddress target)
+        {
+            string url = "http://" + target + ":" + Constants.RestPort + "/api/localsend/v1/info";
+            try
+            {
+                HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+                req.Method = "GET";
+                req.Timeout = 5000;
+                req.KeepAlive = false;
+                using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+                using (Stream s = resp.GetResponseStream())
+                using (StreamReader sr = new StreamReader(s, Encoding.UTF8))
+                {
+                    string body = sr.ReadToEnd();
+                    if (body != null && body.Length > 400) body = body.Substring(0, 400) + "...";
+                    Log.Info("Probe HTTP " + url + " -> " + (int)resp.StatusCode + " body=" + body);
+                }
+            }
+            catch (WebException wex)
+            {
+                string status = wex.Status.ToString();
+                string http = "";
+                if (wex.Response is HttpWebResponse)
+                    http = " http=" + (int)((HttpWebResponse)wex.Response).StatusCode;
+                Log.Warn("Probe HTTP " + url + " WebException status=" + status + http + " msg=" + wex.Message);
+            }
+            catch (Exception ex) { Log.Warn("Probe HTTP " + url + " failed: " + ex.Message); }
+        }
     }
 }

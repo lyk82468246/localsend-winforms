@@ -25,6 +25,7 @@ namespace Localsend
         private MenuItem _miLangEn;
         private MenuItem _miLangZh;
         private MenuItem _miLog;
+        private MenuItem _miProbe;
         private MenuItem _miAbout;
         private MenuItem _miExit;
 
@@ -64,10 +65,12 @@ namespace Localsend
             _miLang.MenuItems.Add(_miLangZh);
             _miAbout = new MenuItem(); _miAbout.Click += new EventHandler(OnAboutClick);
             _miLog = new MenuItem(); _miLog.Click += new EventHandler(OnLogClick);
+            _miProbe = new MenuItem(); _miProbe.Click += new EventHandler(OnProbeClick);
             _miExit = new MenuItem(); _miExit.Click += new EventHandler(OnExitClick);
             _miMenu.MenuItems.Add(_miRefresh);
             _miMenu.MenuItems.Add(_miLang);
             _miMenu.MenuItems.Add(_miLog);
+            _miMenu.MenuItems.Add(_miProbe);
             _miMenu.MenuItems.Add(_miAbout);
             _miMenu.MenuItems.Add(_miExit);
 
@@ -88,6 +91,7 @@ namespace Localsend
             _miLangZh.Text = I18n.T("menu.lang.zh") + (I18n.Current == I18n.LangZh ? " *" : "");
             _miAbout.Text = I18n.T("menu.about");
             _miLog.Text = I18n.T("menu.log");
+            _miProbe.Text = I18n.T("menu.probe");
             _miExit.Text = I18n.T("menu.exit");
 
             if (_cfg != null)
@@ -179,6 +183,14 @@ namespace Localsend
         {
             LogForm f = new LogForm();
             f.Show();
+        }
+
+        private void OnProbeClick(object sender, EventArgs e)
+        {
+            if (_svc == null) return;
+            ProbeForm pf = new ProbeForm();
+            if (pf.ShowDialog() == DialogResult.OK && pf.Address != null)
+                _svc.Probe(pf.Address);
         }
 
         // ---- events from background ----
