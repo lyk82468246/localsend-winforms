@@ -190,7 +190,7 @@ namespace Localsend
             if (_svc == null) return;
             ProbeForm pf = new ProbeForm();
             if (pf.ShowDialog() == DialogResult.OK && pf.Address != null)
-                _svc.Probe(pf.Address);
+                _svc.Probe(pf.Address, pf.Port);
         }
 
         // ---- events from background ----

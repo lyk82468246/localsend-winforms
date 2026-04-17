@@ -86,23 +86,51 @@ namespace Localsend.Backend
         public void Dispose() { Stop(); }
 
         /// <summary>
-        /// 手动探测目标 IP：
-        /// 1) 发一条单播 UDP announce（绕开多播，验证 L3 连通并让对方看到我们）
-        /// 2) HTTP GET /api/localsend/v1/info（验证 TCP/HTTP 连通、并读回对方 DeviceInfo）
+        /// 手动探测目标 IP:port：
+        /// 1) 裸 TCP connect（验证 L3/L4 可达，剥离 HTTP 层）
+        /// 2) 若 port == RestPort：发一条单播 UDP announce + HTTP GET /api/localsend/v1/info
         /// </summary>
-        public void Probe(IPAddress target)
+        public void Probe(IPAddress target, int port)
         {
             if (target == null) return;
-            Log.Info("Probe start -> " + target);
-            try { _discovery.SendUnicastAnnounce(target); }
-            catch (Exception ex) { Log.Warn("Probe unicast announce threw: " + ex.Message); }
+            Log.Info("Probe start -> " + target + ":" + port);
 
-            ThreadPool.QueueUserWorkItem(delegate { ProbeHttp(target); });
+            ThreadPool.QueueUserWorkItem(delegate { ProbeTcp(target, port); });
+
+            if (port == Constants.RestPort)
+            {
+                try { _discovery.SendUnicastAnnounce(target); }
+                catch (Exception ex) { Log.Warn("Probe unicast announce threw: " + ex.Message); }
+                ThreadPool.QueueUserWorkItem(delegate { ProbeHttp(target, port); });
+            }
         }
 
-        private void ProbeHttp(IPAddress target)
+        /// <summary>兼容旧调用点：默认用 LocalSend 端口。</summary>
+        public void Probe(IPAddress target) { Probe(target, Constants.RestPort); }
+
+        private static void ProbeTcp(IPAddress target, int port)
         {
-            string url = "http://" + target + ":" + Constants.RestPort + "/api/localsend/v1/info";
+            string tag = target + ":" + port;
+            System.Net.Sockets.Socket s = null;
+            try
+            {
+                s = new System.Net.Sockets.Socket(
+                    System.Net.Sockets.AddressFamily.InterNetwork,
+                    System.Net.Sockets.SocketType.Stream,
+                    System.Net.Sockets.ProtocolType.Tcp);
+                IAsyncResult ar = s.BeginConnect(new IPEndPoint(target, port), null, null);
+                bool ok = ar.AsyncWaitHandle.WaitOne(3000, false);
+                if (!ok) { Log.Warn("Probe TCP " + tag + " timeout"); try { s.Close(); } catch { } return; }
+                s.EndConnect(ar);
+                Log.Info("Probe TCP " + tag + " CONNECTED");
+            }
+            catch (Exception ex) { Log.Warn("Probe TCP " + tag + " failed: " + ex.Message); }
+            finally { if (s != null) try { s.Close(); } catch { } }
+        }
+
+        private void ProbeHttp(IPAddress target, int port)
+        {
+            string url = "http://" + target + ":" + port + "/api/localsend/v1/info";
             try
             {
                 HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
