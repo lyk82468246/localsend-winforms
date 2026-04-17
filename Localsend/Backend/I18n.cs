@@ -76,6 +76,7 @@ namespace Localsend.Backend
             en["menu.more"] = "Menu"; zh["menu.more"] = "菜单";
             en["menu.refresh"] = "Refresh"; zh["menu.refresh"] = "刷新";
             en["menu.about"] = "About"; zh["menu.about"] = "关于";
+            en["menu.log"] = "Log"; zh["menu.log"] = "日志";
             en["menu.exit"] = "Exit"; zh["menu.exit"] = "退出";
             en["menu.language"] = "Language"; zh["menu.language"] = "语言";
             en["menu.lang.en"] = "English"; zh["menu.lang.en"] = "English";

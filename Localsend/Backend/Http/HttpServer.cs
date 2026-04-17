@@ -129,6 +129,7 @@ namespace Localsend.Backend.Http
                 catch (InvalidOperationException) { break; }
 
                 TcpClient c = client;
+                try { Log.Info("HTTP accept from " + c.Client.RemoteEndPoint); } catch { }
                 ThreadPool.QueueUserWorkItem(delegate { HandleClient(c); });
             }
         }
@@ -142,8 +143,11 @@ namespace Localsend.Backend.Http
                 HttpContext ctx = ReadRequest(ns, (IPEndPoint)client.Client.RemoteEndPoint);
                 if (ctx == null) return;
 
+                Log.Info("HTTP " + ctx.Method + " " + ctx.RawPath + " from " + ctx.Remote
+                    + " CL=" + ctx.ContentLength);
+
                 HttpHandler handler = FindRoute(ctx.Method, ctx.Path);
-                if (handler == null) { ctx.SendText(404, "Not Found"); return; }
+                if (handler == null) { Log.Warn("HTTP 404 " + ctx.Method + " " + ctx.Path); ctx.SendText(404, "Not Found"); return; }
 
                 try { handler(ctx); }
                 catch (Exception ex)

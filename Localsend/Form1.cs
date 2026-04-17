@@ -24,6 +24,7 @@ namespace Localsend
         private MenuItem _miLang;
         private MenuItem _miLangEn;
         private MenuItem _miLangZh;
+        private MenuItem _miLog;
         private MenuItem _miAbout;
         private MenuItem _miExit;
 
@@ -62,9 +63,11 @@ namespace Localsend
             _miLang.MenuItems.Add(_miLangEn);
             _miLang.MenuItems.Add(_miLangZh);
             _miAbout = new MenuItem(); _miAbout.Click += new EventHandler(OnAboutClick);
+            _miLog = new MenuItem(); _miLog.Click += new EventHandler(OnLogClick);
             _miExit = new MenuItem(); _miExit.Click += new EventHandler(OnExitClick);
             _miMenu.MenuItems.Add(_miRefresh);
             _miMenu.MenuItems.Add(_miLang);
+            _miMenu.MenuItems.Add(_miLog);
             _miMenu.MenuItems.Add(_miAbout);
             _miMenu.MenuItems.Add(_miExit);
 
@@ -84,6 +87,7 @@ namespace Localsend
             _miLangEn.Text = I18n.T("menu.lang.en") + (I18n.Current == I18n.LangEn ? " *" : "");
             _miLangZh.Text = I18n.T("menu.lang.zh") + (I18n.Current == I18n.LangZh ? " *" : "");
             _miAbout.Text = I18n.T("menu.about");
+            _miLog.Text = I18n.T("menu.log");
             _miExit.Text = I18n.T("menu.exit");
 
             if (_cfg != null)
@@ -170,6 +174,12 @@ namespace Localsend
         }
 
         private void OnExitClick(object sender, EventArgs e) { this.Close(); }
+
+        private void OnLogClick(object sender, EventArgs e)
+        {
+            LogForm f = new LogForm();
+            f.Show();
+        }
 
         // ---- events from background ----
 

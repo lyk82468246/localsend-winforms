@@ -1,16 +1,100 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
+using System.Reflection;
+using System.Text;
 
 namespace Localsend.Backend.Util
 {
-    /// <summary>轻量日志。调试期走 Debug.WriteLine，后续可替换为文件输出。</summary>
+    /// <summary>
+    /// 日志：同时写 Debug.WriteLine、进程内环形缓冲（供 UI 查看）、以及 exe 同目录下的 localsend.log。
+    /// CF 3.5 真机上看不到 Debug.WriteLine，必须有文件/UI 查看通道。
+    /// </summary>
     internal static class Log
     {
-        public static void Info(string msg) { Debug.WriteLine("[INFO ] " + msg); }
-        public static void Warn(string msg) { Debug.WriteLine("[WARN ] " + msg); }
-        public static void Error(string msg) { Debug.WriteLine("[ERROR] " + msg); }
-        public static void Error(string msg, Exception ex) { Debug.WriteLine("[ERROR] " + msg + ": " + ex); }
+        private const int RingCapacity = 400;
+        private static readonly object _lock = new object();
+        private static readonly LinkedList<string> _ring = new LinkedList<string>();
+        private static string _filePath;
+        private static bool _fileInitAttempted;
+
+        public static event EventHandler LineWritten;
+
+        public static void Info(string msg) { Write("INFO ", msg); }
+        public static void Warn(string msg) { Write("WARN ", msg); }
+        public static void Error(string msg) { Write("ERROR", msg); }
+        public static void Error(string msg, Exception ex) { Write("ERROR", msg + ": " + ex); }
+
+        /// <summary>返回最近 N 行的副本（旧→新）。</summary>
+        public static string[] Snapshot()
+        {
+            lock (_lock)
+            {
+                string[] arr = new string[_ring.Count];
+                int i = 0;
+                for (LinkedListNode<string> n = _ring.First; n != null; n = n.Next) arr[i++] = n.Value;
+                return arr;
+            }
+        }
+
+        public static string FilePath
+        {
+            get { EnsureFile(); return _filePath; }
+        }
+
+        private static void Write(string level, string msg)
+        {
+            string line = DateTime.Now.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture)
+                        + " [" + level + "] " + msg;
+            Debug.WriteLine(line);
+
+            lock (_lock)
+            {
+                _ring.AddLast(line);
+                while (_ring.Count > RingCapacity) _ring.RemoveFirst();
+            }
+
+            EnsureFile();
+            if (_filePath != null)
+            {
+                try
+                {
+                    using (FileStream fs = new FileStream(_filePath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
+                    using (StreamWriter sw = new StreamWriter(fs, Encoding.UTF8))
+                    {
+                        sw.WriteLine(line);
+                    }
+                }
+                catch { /* log write must not throw */ }
+            }
+
+            EventHandler h = LineWritten;
+            if (h != null) try { h(null, EventArgs.Empty); } catch { }
+        }
+
+        private static void EnsureFile()
+        {
+            if (_fileInitAttempted) return;
+            _fileInitAttempted = true;
+            try
+            {
+                string codeBase = Assembly.GetExecutingAssembly().GetName().CodeBase;
+                if (string.IsNullOrEmpty(codeBase)) { _filePath = null; return; }
+                if (codeBase.StartsWith("file:///")) codeBase = codeBase.Substring(8);
+                string dir = Path.GetDirectoryName(codeBase);
+                if (string.IsNullOrEmpty(dir)) dir = "\\";
+                _filePath = Path.Combine(dir, "localsend.log");
+                // 启动时截断，避免日志无限增长
+                using (FileStream fs = new FileStream(_filePath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite))
+                using (StreamWriter sw = new StreamWriter(fs, Encoding.UTF8))
+                {
+                    sw.WriteLine("--- localsend log start " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " ---");
+                }
+            }
+            catch { _filePath = null; }
+        }
     }
 
     internal static class IdGen
@@ -55,4 +139,3 @@ namespace Localsend.Backend.Util
         }
     }
 }
-
