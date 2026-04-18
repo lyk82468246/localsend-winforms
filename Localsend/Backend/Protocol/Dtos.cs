@@ -49,7 +49,8 @@ namespace Localsend.Backend.Protocol
         }
     }
 
-    /// <summary>UDP 多播 announce 消息。</summary>
+    /// <summary>UDP 多播 announce 消息。本端只实现 v1 接收端，announce 按 v1 形状发出
+    /// （不含 version/port/protocol/download），以免 v2 客户端对我们使用 /v2/ 端点。</summary>
     internal sealed class AnnounceMessage
     {
         public DeviceInfo Info;
@@ -57,7 +58,7 @@ namespace Localsend.Backend.Protocol
 
         public Dictionary<string, object> ToJson()
         {
-            Dictionary<string, object> o = Info.ToJson(true);
+            Dictionary<string, object> o = Info.ToJson(false);
             o["announcement"] = Announcement;
             return o;
         }

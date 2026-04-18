@@ -67,7 +67,13 @@ namespace Localsend.Backend.Util
                         sw.WriteLine(line);
                     }
                 }
-                catch { /* log write must not throw */ }
+                catch (Exception ex)
+                {
+                    // 写失败就记录到环缓冲（限一次，避免无限自反馈），并允许下次再试
+                    NoteFileFailure("write", _filePath, ex);
+                    _filePath = null;
+                    _fileInitAttempted = false;
+                }
             }
 
             EventHandler h = LineWritten;
@@ -78,22 +84,58 @@ namespace Localsend.Backend.Util
         {
             if (_fileInitAttempted) return;
             _fileInitAttempted = true;
+
+            // 候选目录：\My Documents\（WM6 保证可写）→ exe 同目录。
+            List<string> candidates = new List<string>();
+            try
+            {
+                string personal = Environment.GetFolderPath(Environment.SpecialFolder.Personal);
+                if (!string.IsNullOrEmpty(personal)) candidates.Add(personal);
+            }
+            catch { }
             try
             {
                 string codeBase = Assembly.GetExecutingAssembly().GetName().CodeBase;
-                if (string.IsNullOrEmpty(codeBase)) { _filePath = null; return; }
-                if (codeBase.StartsWith("file:///")) codeBase = codeBase.Substring(8);
-                string dir = Path.GetDirectoryName(codeBase);
-                if (string.IsNullOrEmpty(dir)) dir = "\\";
-                _filePath = Path.Combine(dir, "localsend.log");
-                // 启动时截断，避免日志无限增长
-                using (FileStream fs = new FileStream(_filePath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite))
-                using (StreamWriter sw = new StreamWriter(fs, Encoding.UTF8))
+                if (!string.IsNullOrEmpty(codeBase))
                 {
-                    sw.WriteLine("--- localsend log start " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " ---");
+                    if (codeBase.StartsWith("file:///")) codeBase = codeBase.Substring(8);
+                    string exeDir = Path.GetDirectoryName(codeBase);
+                    if (!string.IsNullOrEmpty(exeDir)) candidates.Add(exeDir);
                 }
             }
-            catch { _filePath = null; }
+            catch { }
+            if (candidates.Count == 0) candidates.Add("\\");
+
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                string path = Path.Combine(candidates[i], "localsend.log");
+                try
+                {
+                    using (FileStream fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.ReadWrite))
+                    using (StreamWriter sw = new StreamWriter(fs, Encoding.UTF8))
+                    {
+                        sw.WriteLine("--- localsend log start " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " ---");
+                    }
+                    _filePath = path;
+                    NoteFileFailure("open-ok", path, null);
+                    return;
+                }
+                catch (Exception ex) { NoteFileFailure("open", path, ex); }
+            }
+            _filePath = null;
+        }
+
+        /// <summary>把日志文件相关的成败信息写入环缓冲，绕过 Write 避免递归。</summary>
+        private static void NoteFileFailure(string what, string path, Exception ex)
+        {
+            string msg = DateTime.Now.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture)
+                + " [META ] log " + what + " " + path + (ex == null ? " OK" : ": " + ex.Message);
+            lock (_lock)
+            {
+                _ring.AddLast(msg);
+                while (_ring.Count > RingCapacity) _ring.RemoveFirst();
+            }
+            Debug.WriteLine(msg);
         }
     }
 
