@@ -19,8 +19,36 @@ namespace Localsend.Backend.Util
         private static readonly LinkedList<string> _ring = new LinkedList<string>();
         private static string _filePath;
         private static bool _fileInitAttempted;
+        private static bool _fileEnabled; // 默认不写文件；由 UI/设置开启
 
         public static event EventHandler LineWritten;
+
+        /// <summary>
+        /// 是否把日志持久化到本地文件。默认 false。切为 true 时下一次 Write 会新建/截断文件。
+        /// 切回 false 只是不再往文件里写，已写内容保留。
+        /// </summary>
+        public static bool FileLoggingEnabled
+        {
+            get { lock (_lock) return _fileEnabled; }
+            set
+            {
+                lock (_lock)
+                {
+                    if (_fileEnabled == value) return;
+                    _fileEnabled = value;
+                    if (value)
+                    {
+                        _fileInitAttempted = false;
+                        _filePath = null;
+                    }
+                    else
+                    {
+                        _filePath = null;
+                        _fileInitAttempted = true; // 关闭时不尝试初始化
+                    }
+                }
+            }
+        }
 
         public static void Info(string msg) { Write("INFO ", msg); }
         public static void Warn(string msg) { Write("WARN ", msg); }
@@ -57,7 +85,7 @@ namespace Localsend.Backend.Util
                 while (_ring.Count > RingCapacity) _ring.RemoveFirst();
 
                 EnsureFileLocked();
-                if (_filePath != null)
+                if (_fileEnabled && _filePath != null)
                 {
                     try
                     {
@@ -82,6 +110,7 @@ namespace Localsend.Backend.Util
 
         private static void EnsureFileLocked()
         {
+            if (!_fileEnabled) return;
             if (_fileInitAttempted) return;
             _fileInitAttempted = true;
 

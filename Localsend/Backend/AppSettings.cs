@@ -14,6 +14,7 @@ namespace Localsend.Backend
         public string DownloadDir;
         public string Fingerprint;
         public string Language;
+        public bool LogToFile;
 
         private string _path;
 
@@ -37,6 +38,7 @@ namespace Localsend.Backend
                     s.DownloadDir = JsonHelpers.AsString(o, "downloadDir");
                     s.Fingerprint = JsonHelpers.AsString(o, "fingerprint");
                     s.Language = JsonHelpers.AsString(o, "language");
+                    s.LogToFile = JsonHelpers.AsBool(o, "logToFile", false);
                 }
                 catch (Exception ex) { Log.Warn("settings load failed: " + ex.Message); }
             }
@@ -58,6 +60,7 @@ namespace Localsend.Backend
                 o["downloadDir"] = DownloadDir;
                 o["fingerprint"] = Fingerprint;
                 o["language"] = Language;
+                o["logToFile"] = LogToFile;
                 using (StreamWriter w = new StreamWriter(_path, false, Encoding.UTF8))
                     w.Write(Json.Stringify(o));
             }

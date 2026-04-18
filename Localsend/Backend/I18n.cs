@@ -77,6 +77,7 @@ namespace Localsend.Backend
             en["menu.refresh"] = "Refresh"; zh["menu.refresh"] = "刷新";
             en["menu.about"] = "About"; zh["menu.about"] = "关于";
             en["menu.log"] = "Log"; zh["menu.log"] = "日志";
+            en["menu.logFile"] = "Log to file"; zh["menu.logFile"] = "持久日志";
             en["menu.probe"] = "Probe..."; zh["menu.probe"] = "探测...";
             en["menu.exit"] = "Exit"; zh["menu.exit"] = "退出";
             en["menu.language"] = "Language"; zh["menu.language"] = "语言";
@@ -109,8 +110,8 @@ namespace Localsend.Backend
             en["msg.filter"] = "All files|*.*"; zh["msg.filter"] = "所有文件|*.*";
 
             // about dialog
-            en["about.body"] = "LocalSend for WM6\r\nAlias: {0}\r\nFingerprint: {1}\r\nPort: 53317";
-            zh["about.body"] = "LocalSend for WM6\r\n别名: {0}\r\n指纹: {1}\r\n端口: 53317";
+            en["about.body"] = "LocalSend for WM6 v1.0\r\nAlias: {0}\r\nFingerprint: {1}\r\nPort: 53317";
+            zh["about.body"] = "LocalSend for WM6 v1.0\r\n别名: {0}\r\n指纹: {1}\r\n端口: 53317";
 
             _dicts[LangEn] = en;
             _dicts[LangZh] = zh;

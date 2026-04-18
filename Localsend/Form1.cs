@@ -25,6 +25,7 @@ namespace Localsend
         private MenuItem _miLangEn;
         private MenuItem _miLangZh;
         private MenuItem _miLog;
+        private MenuItem _miLogFile;
         private MenuItem _miProbe;
         private MenuItem _miAbout;
         private MenuItem _miExit;
@@ -65,11 +66,13 @@ namespace Localsend
             _miLang.MenuItems.Add(_miLangZh);
             _miAbout = new MenuItem(); _miAbout.Click += new EventHandler(OnAboutClick);
             _miLog = new MenuItem(); _miLog.Click += new EventHandler(OnLogClick);
+            _miLogFile = new MenuItem(); _miLogFile.Click += new EventHandler(OnLogFileClick);
             _miProbe = new MenuItem(); _miProbe.Click += new EventHandler(OnProbeClick);
             _miExit = new MenuItem(); _miExit.Click += new EventHandler(OnExitClick);
             _miMenu.MenuItems.Add(_miRefresh);
             _miMenu.MenuItems.Add(_miLang);
             _miMenu.MenuItems.Add(_miLog);
+            _miMenu.MenuItems.Add(_miLogFile);
             _miMenu.MenuItems.Add(_miProbe);
             _miMenu.MenuItems.Add(_miAbout);
             _miMenu.MenuItems.Add(_miExit);
@@ -91,6 +94,7 @@ namespace Localsend
             _miLangZh.Text = I18n.T("menu.lang.zh") + (I18n.Current == I18n.LangZh ? " *" : "");
             _miAbout.Text = I18n.T("menu.about");
             _miLog.Text = I18n.T("menu.log");
+            _miLogFile.Text = I18n.T("menu.logFile") + (Localsend.Backend.Util.Log.FileLoggingEnabled ? " *" : "");
             _miProbe.Text = I18n.T("menu.probe");
             _miExit.Text = I18n.T("menu.exit");
 
@@ -111,6 +115,7 @@ namespace Localsend
             {
                 _cfg = AppSettings.LoadOrCreate();
                 if (!string.IsNullOrEmpty(_cfg.Language)) I18n.Current = _cfg.Language;
+                Localsend.Backend.Util.Log.FileLoggingEnabled = _cfg.LogToFile;
 
                 _svc = new LocalSendService(_cfg.Alias, _cfg.DownloadDir, null, _cfg.Fingerprint);
                 _svc.Peers.PeerListChanged += new EventHandler(OnPeerListChanged);
@@ -183,6 +188,14 @@ namespace Localsend
         {
             LogForm f = new LogForm();
             f.Show();
+        }
+
+        private void OnLogFileClick(object sender, EventArgs e)
+        {
+            bool newVal = !Localsend.Backend.Util.Log.FileLoggingEnabled;
+            Localsend.Backend.Util.Log.FileLoggingEnabled = newVal;
+            if (_cfg != null) { _cfg.LogToFile = newVal; _cfg.Save(); }
+            ApplyTexts();
         }
 
         private void OnProbeClick(object sender, EventArgs e)
