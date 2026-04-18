@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Net;
 using System.Text;
 using Localsend.Backend.Http;
 using Localsend.Backend.Protocol;
+using Localsend.Backend.Sender;
 using Localsend.Backend.Util;
 
 namespace Localsend.Backend.Receiver
@@ -15,13 +17,15 @@ namespace Localsend.Backend.Receiver
         private readonly SessionManager _sessions;
         private readonly IReceivePolicy _policy;
         private readonly string _downloadDir;
+        private readonly PeerRegistry _peers;
 
-        public V1ApiHandler(DeviceInfo self, SessionManager sessions, IReceivePolicy policy, string downloadDir)
+        public V1ApiHandler(DeviceInfo self, SessionManager sessions, IReceivePolicy policy, string downloadDir, PeerRegistry peers)
         {
             _self = self;
             _sessions = sessions;
             _policy = policy ?? new AutoAcceptPolicy();
             _downloadDir = downloadDir;
+            _peers = peers;
             if (!Directory.Exists(_downloadDir)) Directory.CreateDirectory(_downloadDir);
         }
 
@@ -31,14 +35,46 @@ namespace Localsend.Backend.Receiver
             server.Map("POST", Constants.ApiV1 + "/send-request", SendRequestEndpoint);
             server.Map("POST", Constants.ApiV1 + "/send",         SendEndpoint);
             server.Map("POST", Constants.ApiV1 + "/cancel",       CancelEndpoint);
+            // HTTP 注册兜底：对端多播收不到我们时，会直接 POST 过来告诉我们它自己；
+            // 我们回复自己的 info 作为应答。v1 / v2 两条路径都挂。
+            server.Map("POST", Constants.ApiV1 + "/register",     RegisterEndpoint);
+            server.Map("POST", Constants.ApiV2 + "/register",     RegisterEndpoint);
             // 兼容 v2 一些客户端可能先 GET /info：也挂到 v2 路径（只暴露设备信息）
             server.Map("GET",  Constants.ApiV2 + "/info",         Info);
         }
 
         private void Info(HttpContext ctx)
         {
-            Dictionary<string, object> o = _self.ToJson(true);
+            // 只暴露 v1 字段，与 announce 一致，避免被认作 v2 对端。
+            Dictionary<string, object> o = _self.ToJson(false);
             ctx.SendJson(200, Json.Stringify(o));
+        }
+
+        private void RegisterEndpoint(HttpContext ctx)
+        {
+            string body = ReadAllText(ctx.Body);
+            Dictionary<string, object> root;
+            try { root = Json.ParseObject(body); }
+            catch { ctx.SendText(400, "Bad JSON"); return; }
+
+            DeviceInfo info;
+            try { info = DeviceInfo.FromJson(root); }
+            catch { ctx.SendText(400, "Bad register payload"); return; }
+
+            if (info == null || string.IsNullOrEmpty(info.Fingerprint))
+            {
+                Log.Warn("Register from " + ctx.Remote + " missing fingerprint; body=" + body);
+                ctx.SendText(400, "Missing fingerprint");
+                return;
+            }
+
+            IPAddress src = ctx.Remote != null ? ctx.Remote.Address : IPAddress.Any;
+            if (_peers != null) _peers.Upsert(info, src);
+            Log.Info("Register: fp=" + info.Fingerprint + " alias=" + info.Alias
+                + " proto=" + info.Protocol + " port=" + info.Port + " src=" + src);
+
+            // 回复我们自己的 v1 info（与 announce 字段一致）
+            ctx.SendJson(200, Json.Stringify(_self.ToJson(false)));
         }
 
         private void SendRequestEndpoint(HttpContext ctx)

@@ -47,12 +47,12 @@ namespace Localsend.Backend
 
             DownloadDir = downloadDir;
 
+            Peers = new PeerRegistry();
             _sessions = new SessionManager();
             _http = new HttpServer(Constants.RestPort);
-            _v1 = new V1ApiHandler(_self, _sessions, policy, downloadDir);
+            _v1 = new V1ApiHandler(_self, _sessions, policy, downloadDir, Peers);
             _v1.Register(_http);
 
-            Peers = new PeerRegistry();
             Sender = new OutboundSender(_self);
 
             _discovery = new MulticastDiscovery(_self);

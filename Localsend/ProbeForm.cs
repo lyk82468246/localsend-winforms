@@ -1,5 +1,6 @@
 using System;
 using System.Net;
+using System.Net.Sockets;
 using System.Windows.Forms;
 
 namespace Localsend
@@ -26,7 +27,7 @@ namespace Localsend
 
             _txtIp = new TextBox();
             _txtIp.Dock = DockStyle.Top;
-            _txtIp.Text = "192.168.31.";
+            _txtIp.Text = GuessDefaultPrefix();
             this.Controls.Add(_txtIp);
 
             Label lblPort = new Label();
@@ -84,6 +85,29 @@ namespace Localsend
             Port = port;
             this.DialogResult = DialogResult.OK;
             this.Close();
+        }
+        private static string GuessDefaultPrefix()
+        {
+            // 取当前本机第一个非 loopback / 非链路本地的 IPv4，返回其前三段 + "."。
+            try
+            {
+                IPHostEntry he = Dns.GetHostEntry(Dns.GetHostName());
+                if (he != null && he.AddressList != null)
+                {
+                    for (int i = 0; i < he.AddressList.Length; i++)
+                    {
+                        IPAddress a = he.AddressList[i];
+                        if (a == null || a.AddressFamily != AddressFamily.InterNetwork) continue;
+                        byte[] b = a.GetAddressBytes();
+                        if (b.Length != 4) continue;
+                        if (b[0] == 127) continue;
+                        if (b[0] == 169 && b[1] == 254) continue;
+                        return b[0] + "." + b[1] + "." + b[2] + ".";
+                    }
+                }
+            }
+            catch { }
+            return "";
         }
     }
 }

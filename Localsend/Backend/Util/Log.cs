@@ -41,7 +41,7 @@ namespace Localsend.Backend.Util
 
         public static string FilePath
         {
-            get { EnsureFile(); return _filePath; }
+            get { lock (_lock) { EnsureFileLocked(); return _filePath; } }
         }
 
         private static void Write(string level, string msg)
@@ -50,29 +50,29 @@ namespace Localsend.Backend.Util
                         + " [" + level + "] " + msg;
             Debug.WriteLine(line);
 
+            // 整个"追加环缓冲 + 写文件"序列化，避免多线程写文件字节交错。
             lock (_lock)
             {
                 _ring.AddLast(line);
                 while (_ring.Count > RingCapacity) _ring.RemoveFirst();
-            }
 
-            EnsureFile();
-            if (_filePath != null)
-            {
-                try
+                EnsureFileLocked();
+                if (_filePath != null)
                 {
-                    using (FileStream fs = new FileStream(_filePath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
-                    using (StreamWriter sw = new StreamWriter(fs, Encoding.UTF8))
+                    try
                     {
-                        sw.WriteLine(line);
+                        using (FileStream fs = new FileStream(_filePath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
+                        using (StreamWriter sw = new StreamWriter(fs, Encoding.UTF8))
+                        {
+                            sw.WriteLine(line);
+                        }
                     }
-                }
-                catch (Exception ex)
-                {
-                    // 写失败就记录到环缓冲（限一次，避免无限自反馈），并允许下次再试
-                    NoteFileFailure("write", _filePath, ex);
-                    _filePath = null;
-                    _fileInitAttempted = false;
+                    catch (Exception ex)
+                    {
+                        NoteFileFailureLocked("write", _filePath, ex);
+                        _filePath = null;
+                        _fileInitAttempted = false;
+                    }
                 }
             }
 
@@ -80,7 +80,7 @@ namespace Localsend.Backend.Util
             if (h != null) try { h(null, EventArgs.Empty); } catch { }
         }
 
-        private static void EnsureFile()
+        private static void EnsureFileLocked()
         {
             if (_fileInitAttempted) return;
             _fileInitAttempted = true;
@@ -117,24 +117,21 @@ namespace Localsend.Backend.Util
                         sw.WriteLine("--- localsend log start " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " ---");
                     }
                     _filePath = path;
-                    NoteFileFailure("open-ok", path, null);
+                    NoteFileFailureLocked("open-ok", path, null);
                     return;
                 }
-                catch (Exception ex) { NoteFileFailure("open", path, ex); }
+                catch (Exception ex) { NoteFileFailureLocked("open", path, ex); }
             }
             _filePath = null;
         }
 
-        /// <summary>把日志文件相关的成败信息写入环缓冲，绕过 Write 避免递归。</summary>
-        private static void NoteFileFailure(string what, string path, Exception ex)
+        /// <summary>必须已持有 _lock 调用。</summary>
+        private static void NoteFileFailureLocked(string what, string path, Exception ex)
         {
             string msg = DateTime.Now.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture)
                 + " [META ] log " + what + " " + path + (ex == null ? " OK" : ": " + ex.Message);
-            lock (_lock)
-            {
-                _ring.AddLast(msg);
-                while (_ring.Count > RingCapacity) _ring.RemoveFirst();
-            }
+            _ring.AddLast(msg);
+            while (_ring.Count > RingCapacity) _ring.RemoveFirst();
             Debug.WriteLine(msg);
         }
     }
