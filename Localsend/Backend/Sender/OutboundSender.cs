@@ -5,6 +5,8 @@ using System.Net;
 using System.Text;
 using System.Threading;
 using Localsend.Backend.Protocol;
+using Localsend.Backend.Http;
+using Localsend.Backend.Tls;
 using Localsend.Backend.Util;
 
 namespace Localsend.Backend.Sender
@@ -33,11 +35,21 @@ namespace Localsend.Backend.Sender
             if (!string.IsNullOrEmpty(ext)) ext = ext.ToLower();
             switch (ext)
             {
-                case ".jpg": case ".jpeg": case ".png": case ".gif": case ".bmp": return "image";
-                case ".mp4": case ".avi": case ".mov": case ".mkv": case ".webm": case ".3gp": return "video";
-                case ".pdf": return "pdf";
-                case ".txt": case ".md": case ".log": case ".csv": return "text";
-                default: return "other";
+                case ".jpg": case ".jpeg": return "image/jpeg";
+                case ".png": return "image/png";
+                case ".gif": return "image/gif";
+                case ".bmp": return "image/bmp";
+                case ".mp4": return "video/mp4";
+                case ".avi": return "video/x-msvideo";
+                case ".mov": return "video/quicktime";
+                case ".mkv": return "video/x-matroska";
+                case ".webm": return "video/webm";
+                case ".3gp": return "video/3gpp";
+                case ".pdf": return "application/pdf";
+                case ".txt": return "text/plain";
+                case ".md": case ".log": return "text/markdown";
+                case ".csv": return "text/csv";
+                default: return "application/octet-stream";
             }
         }
     }
@@ -58,6 +70,7 @@ namespace Localsend.Backend.Sender
     internal sealed class SendJob
     {
         public string Id;
+        public string SessionId;
         public Peer Peer;
         public SenderFileSpec[] Files;
         public volatile bool Cancel;
@@ -65,20 +78,26 @@ namespace Localsend.Backend.Sender
 
     /// <summary>
     /// 向已知对端发送文件。单次调用发起一个后台任务。
-    /// 协议：v1 /send-request + /send。对 HTTPS 对端同样使用 v1 路由（LocalSend 向后兼容）。
+    /// 协议：优先使用 LocalSend v2.2 prepare-upload/upload；对旧设备保留 v1。
     /// </summary>
     public sealed class OutboundSender
     {
         private readonly DeviceInfo _self;
+        private readonly TlsProviderRouter _tls;
+        private readonly bool _fullEncryption;
         private readonly object _lock = new object();
         private readonly Dictionary<string, SendJob> _jobs = new Dictionary<string, SendJob>();
 
         public event EventHandler<SendProgressEventArgs> Progress;
 
         internal OutboundSender(DeviceInfo self)
+            : this(self, null, false) { }
+
+        internal OutboundSender(DeviceInfo self, TlsProviderRouter tls, bool fullEncryption)
         {
             _self = self;
-            AllowAnyCertPolicy.Install();
+            _tls = tls;
+            _fullEncryption = fullEncryption;
         }
 
         public string Send(Peer peer, SenderFileSpec[] files)
@@ -134,15 +153,54 @@ namespace Localsend.Backend.Sender
                 root["files"] = filesObj;
                 string reqJson = Json.Stringify(root);
 
-                string tokensJson = PostJson(job.Peer.BaseUrl + Constants.ApiV1 + "/send-request", reqJson);
-                if (job.Cancel) { Emit(job, null, null, 0, 0, SendStage.Cancelled, null); return; }
+                bool v2 = IsV2Peer(job.Peer);
+                string prepareUrl = job.Peer.BaseUrl
+                    + (v2 ? Constants.ApiV2 + "/prepare-upload" : Constants.ApiV1 + "/send-request");
+                int prepareStatus;
+                string tokensJson = PostJson(job.Peer, prepareUrl, reqJson, out prepareStatus);
+                if (job.Cancel)
+                {
+                    TryCancelRemote(job, v2);
+                    Emit(job, null, null, 0, 0, SendStage.Cancelled, null);
+                    return;
+                }
+                // v2.2 uses 204 to mean that no transfer is needed (for
+                // example, every requested file was already handled).  It is
+                // a successful no-op rather than a rejection.
+                if (v2 && prepareStatus == 204)
+                {
+                    Emit(job, null, null, 0, 0, SendStage.JobDone, null);
+                    return;
+                }
 
                 Dictionary<string, object> tokensObj;
-                try { tokensObj = Json.ParseObject(tokensJson); }
+                try
+                {
+                    Dictionary<string, object> prepared = Json.ParseObject(tokensJson);
+                    if (v2)
+                    {
+                        job.SessionId = JsonHelpers.AsString(prepared, "sessionId");
+                        if (string.IsNullOrEmpty(job.SessionId))
+                        {
+                            Emit(job, null, null, 0, 0, SendStage.Failed, "Peer did not return a sessionId");
+                            return;
+                        }
+                        tokensObj = prepared.ContainsKey("files")
+                            ? prepared["files"] as Dictionary<string, object>
+                            : null;
+                        if (tokensObj == null) tokensObj = new Dictionary<string, object>();
+                    }
+                    else tokensObj = prepared;
+                }
                 catch { Emit(job, null, null, 0, 0, SendStage.Failed, "Bad response from peer"); return; }
 
                 if (tokensObj.Count == 0)
                 {
+                    if (v2 && prepareStatus == 204)
+                    {
+                        Emit(job, null, null, 0, 0, SendStage.JobDone, null);
+                        return;
+                    }
                     Emit(job, null, null, 0, 0, SendStage.Rejected, "Peer rejected all files");
                     return;
                 }
@@ -150,20 +208,33 @@ namespace Localsend.Backend.Sender
                 // 2. 依次上传每个被接受的文件
                 foreach (KeyValuePair<string, object> kv in tokensObj)
                 {
-                    if (job.Cancel) { Emit(job, null, null, 0, 0, SendStage.Cancelled, null); return; }
+                    if (job.Cancel)
+                    {
+                        TryCancelRemote(job, v2);
+                        Emit(job, null, null, 0, 0, SendStage.Cancelled, null);
+                        return;
+                    }
 
                     string fileId = kv.Key;
                     string token = kv.Value == null ? null : kv.Value.ToString();
                     if (!idToSpec.ContainsKey(fileId) || string.IsNullOrEmpty(token)) continue;
 
                     SenderFileSpec spec = idToSpec[fileId];
-                    string url = job.Peer.BaseUrl + Constants.ApiV1 + "/send"
-                               + "?fileId=" + UrlEncode(fileId)
+                    string url = job.Peer.BaseUrl
+                               + (v2 ? Constants.ApiV2 + "/upload" : Constants.ApiV1 + "/send")
+                               + "?" + (v2 ? "sessionId=" + UrlEncode(job.SessionId) + "&" : "")
+                               + "fileId=" + UrlEncode(fileId)
                                + "&token=" + UrlEncode(token);
 
                     try { UploadFile(job, fileId, spec, url); }
                     catch (Exception ex)
                     {
+                        if (job.Cancel)
+                        {
+                            TryCancelRemote(job, v2);
+                            Emit(job, null, null, 0, 0, SendStage.Cancelled, null);
+                            return;
+                        }
                         Log.Error("Upload failed for " + spec.FileName, ex);
                         Emit(job, fileId, spec.FileName, 0, spec.Size, SendStage.Failed, ex.Message);
                         return;
@@ -186,58 +257,61 @@ namespace Localsend.Backend.Sender
 
         private void UploadFile(SendJob job, string fileId, SenderFileSpec spec, string url)
         {
-            HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
-            req.Method = "POST";
-            req.ContentType = "application/octet-stream";
-            req.ContentLength = spec.Size;
-            req.KeepAlive = false;
-            req.AllowWriteStreamBuffering = false;
-            req.Timeout = 30000;
-            req.ReadWriteTimeout = 60000;
-
-            using (FileStream fs = new FileStream(spec.LocalPath, FileMode.Open, FileAccess.Read, FileShare.Read))
-            using (Stream reqStream = req.GetRequestStream())
-            {
-                byte[] buf = new byte[16 * 1024];
-                long sent = 0;
-                while (true)
+            SimpleHttpClient http = CreateHttpClient(job.Peer);
+            SimpleHttpResponse resp = http.PostFile(
+                url, spec.LocalPath, "application/octet-stream", spec.Size,
+                ExpectedFingerprint(job.Peer), delegate(long sent)
                 {
-                    if (job.Cancel) { try { req.Abort(); } catch { } throw new IOException("Cancelled"); }
-                    int n = fs.Read(buf, 0, buf.Length);
-                    if (n <= 0) break;
-                    reqStream.Write(buf, 0, n);
-                    sent += n;
+                    if (job.Cancel) throw new IOException("Cancelled");
                     Emit(job, fileId, spec.FileName, sent, spec.Size, SendStage.Uploading, null);
-                }
-            }
-
-            using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
-            {
-                if ((int)resp.StatusCode >= 400)
-                    throw new IOException("Upload rejected: HTTP " + (int)resp.StatusCode);
-            }
+                });
+            if (resp.StatusCode >= 400)
+                throw new IOException("Upload rejected: HTTP " + resp.StatusCode);
         }
 
-        private static string PostJson(string url, string json)
+        private string PostJson(Peer peer, string url, string json, out int statusCode)
         {
-            HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
-            req.Method = "POST";
-            req.ContentType = "application/json";
-            req.KeepAlive = false;
-            req.Timeout = 15000;
-            byte[] bytes = Encoding.UTF8.GetBytes(json);
-            req.ContentLength = bytes.Length;
-            using (Stream s = req.GetRequestStream()) s.Write(bytes, 0, bytes.Length);
+            // The peer URL carries the scheme selected by discovery.  The
+            // TLS provider is only supplied for an HTTPS peer, never for a
+            // clear-text request.
+            SimpleHttpClient http = CreateHttpClient(peer);
+            SimpleHttpResponse resp = http.PostJson(url, json, ExpectedFingerprint(peer));
+            statusCode = resp.StatusCode;
+            if (resp.StatusCode >= 400)
+                throw new IOException("HTTP " + resp.StatusCode + " from peer");
+            return resp.BodyText;
+        }
 
-            using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+        private void TryCancelRemote(SendJob job, bool v2)
+        {
+            if (job == null || job.Peer == null) return;
+            if (v2 && string.IsNullOrEmpty(job.SessionId)) return;
+            string url = job.Peer.BaseUrl + (v2 ? Constants.ApiV2 + "/cancel?sessionId="
+                + UrlEncode(job.SessionId) : Constants.ApiV1 + "/cancel");
+            try
             {
-                if ((int)resp.StatusCode == 204) return "{}";
-                if ((int)resp.StatusCode >= 400)
-                    throw new IOException("HTTP " + (int)resp.StatusCode + " from peer");
-                using (Stream s = resp.GetResponseStream())
-                using (StreamReader r = new StreamReader(s, Encoding.UTF8))
-                    return r.ReadToEnd();
+                SimpleHttpClient http = CreateHttpClient(job.Peer);
+                SimpleHttpResponse response = http.PostJson(
+                    url, "", ExpectedFingerprint(job.Peer));
+                if (response.StatusCode >= 400)
+                    Log.Warn("Remote cancel rejected: HTTP " + response.StatusCode);
             }
+            catch (Exception ex)
+            { Log.Warn("Remote cancel failed: " + ex.Message); }
+        }
+
+        private SimpleHttpClient CreateHttpClient(Peer peer)
+        {
+            bool secure = peer != null && peer.Protocol == "https";
+            if (secure && (!_fullEncryption || _tls == null || !_tls.SupportsStreamTransport))
+                throw new IOException("Peer requires encrypted transport, but this device cannot send encrypted data");
+            return new SimpleHttpClient(secure ? _tls.Provider : null, 15000, 60000);
+        }
+
+        private static string ExpectedFingerprint(Peer peer)
+        {
+            if (peer == null || peer.Protocol != "https") return "";
+            return peer.Fingerprint ?? "";
         }
 
         private static string UrlEncode(string s)
@@ -257,6 +331,12 @@ namespace Localsend.Backend.Sender
                 }
             }
             return sb.ToString();
+        }
+
+        private static bool IsV2Peer(Peer peer)
+        {
+            if (peer == null || string.IsNullOrEmpty(peer.Version)) return false;
+            return peer.Version.StartsWith("2", StringComparison.OrdinalIgnoreCase);
         }
 
         private void Emit(SendJob job, string fileId, string fileName, long bytes, long total, SendStage stage, string msg)

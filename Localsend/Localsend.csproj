@@ -59,6 +59,7 @@
     <Compile Include="Backend\AppSettings.cs" />
     <Compile Include="Backend\Discovery\MulticastDiscovery.cs" />
     <Compile Include="Backend\Http\HttpServer.cs" />
+    <Compile Include="Backend\Http\SimpleHttpClient.cs" />
     <Compile Include="Backend\I18n.cs" />
     <Compile Include="Backend\LocalSendService.cs" />
     <Compile Include="Backend\Protocol\Constants.cs" />
@@ -66,10 +67,18 @@
     <Compile Include="Backend\Protocol\Json.cs" />
     <Compile Include="Backend\Receiver\SessionManager.cs" />
     <Compile Include="Backend\Receiver\V1ApiHandler.cs" />
-    <Compile Include="Backend\Sender\AllowAnyCertPolicy.cs" />
     <Compile Include="Backend\Sender\OutboundSender.cs" />
     <Compile Include="Backend\Sender\PeerRegistry.cs" />
+    <Compile Include="Backend\Runtime\RuntimeEnvironmentInfo.cs" />
+    <Compile Include="Backend\Tls\EncryptionCapabilityReport.cs" />
+    <Compile Include="Backend\Tls\SchannelNative.cs" />
+    <Compile Include="Backend\Tls\SchannelIdentity.cs" />
+    <Compile Include="Backend\Tls\SchannelTlsProvider.cs" />
+    <Compile Include="Backend\Tls\PositronTlsProvider.cs" />
+    <Compile Include="Backend\Tls\TlsProviderAbstractions.cs" />
+    <Compile Include="Backend\Util\Sha256.cs" />
     <Compile Include="Backend\Util\Log.cs" />
+    <Compile Include="AboutForm.cs" />
     <Compile Include="Form1.cs">
       <SubType>Form</SubType>
     </Compile>

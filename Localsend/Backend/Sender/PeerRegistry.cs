@@ -63,7 +63,8 @@ namespace Localsend.Backend.Sender
                 p.DeviceType = info.DeviceType;
                 p.Address = addr;
                 p.Port = info.Port > 0 ? info.Port : Constants.RestPort;
-                p.Protocol = string.IsNullOrEmpty(info.Protocol) ? "http" : info.Protocol;
+                p.Protocol = string.Equals(info.Protocol, "https", StringComparison.OrdinalIgnoreCase)
+                    ? "https" : "http";
                 p.Version = info.Version;
                 p.LastSeenUtc = DateTime.UtcNow;
             }

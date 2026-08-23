@@ -14,10 +14,12 @@ namespace Localsend.Backend.Discovery
     {
         public DeviceInfo Peer;
         public IPAddress Address;
+        public bool Announce;
     }
 
     /// <summary>
-    /// UDP 多播发现：周期性 announce；收到他人 announce 时回复一条非 announcement 响应。
+    /// UDP 多播发现：周期性 announce；收到他人 announce 时通知服务层，
+    /// 由服务层按 v2.2 规范向来源的 HTTP /register 端点注册，并保留 UDP 回复。
     ///
     /// 设计：
     /// - 单 socket 绑定在 *:53317 上接收；
@@ -232,10 +234,12 @@ namespace Localsend.Backend.Discovery
                 PeerDiscoveredEventArgs e = new PeerDiscoveredEventArgs();
                 e.Peer = msg.Info;
                 e.Address = from.Address;
+                e.Announce = msg.Announcement;
                 try { h(this, e); } catch (Exception ex) { Log.Warn("PeerDiscovered handler threw: " + ex.Message); }
             }
 
-            // 协议：收到 announcement=true 时回复一条 announcement=false
+            // 协议：收到 announce=true 时回复一条 announce=false。
+            // 这是 HTTP 注册失败时的兼容回退路径；v2.2 的首选注册由服务层完成。
             if (msg.Announcement)
             {
                 AnnounceMessage reply = new AnnounceMessage();

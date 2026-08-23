@@ -35,6 +35,9 @@ namespace Localsend.Backend.Receiver
             server.Map("POST", Constants.ApiV1 + "/send-request", SendRequestEndpoint);
             server.Map("POST", Constants.ApiV1 + "/send",         SendEndpoint);
             server.Map("POST", Constants.ApiV1 + "/cancel",       CancelEndpoint);
+            server.Map("POST", Constants.ApiV2 + "/prepare-upload", PrepareUploadV2Endpoint);
+            server.Map("POST", Constants.ApiV2 + "/upload",         UploadV2Endpoint);
+            server.Map("POST", Constants.ApiV2 + "/cancel",         CancelV2Endpoint);
             // HTTP 注册兜底：对端多播收不到我们时，会直接 POST 过来告诉我们它自己；
             // 我们回复自己的 info 作为应答。v1 / v2 两条路径都挂。
             server.Map("POST", Constants.ApiV1 + "/register",     RegisterEndpoint);
@@ -45,8 +48,9 @@ namespace Localsend.Backend.Receiver
 
         private void Info(HttpContext ctx)
         {
-            // 只暴露 v1 字段，与 announce 一致，避免被认作 v2 对端。
-            Dictionary<string, object> o = _self.ToJson(false);
+            // v2 clients need the advertised port/protocol; v1 clients
+            // ignore these additional JSON fields.
+            Dictionary<string, object> o = _self.ToJson(true);
             ctx.SendJson(200, Json.Stringify(o));
         }
 
@@ -73,8 +77,7 @@ namespace Localsend.Backend.Receiver
             Log.Info("Register: fp=" + info.Fingerprint + " alias=" + info.Alias
                 + " proto=" + info.Protocol + " port=" + info.Port + " src=" + src);
 
-            // 回复我们自己的 v1 info（与 announce 字段一致）
-            ctx.SendJson(200, Json.Stringify(_self.ToJson(false)));
+            ctx.SendJson(200, Json.Stringify(_self.ToJson(true)));
         }
 
         private void SendRequestEndpoint(HttpContext ctx)
@@ -99,13 +102,54 @@ namespace Localsend.Backend.Receiver
             ctx.SendJson(200, Json.Stringify(reply));
         }
 
+        private void PrepareUploadV2Endpoint(HttpContext ctx)
+        {
+            string body = ReadAllText(ctx.Body);
+            Dictionary<string, object> root;
+            try { root = Json.ParseObject(body); }
+            catch { ctx.SendText(400, "Invalid body"); return; }
+
+            SendRequest req;
+            try { req = SendRequest.FromJson(root); }
+            catch { ctx.SendText(400, "Invalid body"); return; }
+            if (req.Files == null || req.Files.Count == 0)
+            { ctx.SendEmpty(204); return; }
+
+            Dictionary<string, string> tokens = _sessions.TryBegin(req.Info, req.Files, _policy);
+            if (tokens == null) { ctx.SendText(409, "Blocked by another session"); return; }
+            if (tokens.Count == 0) { ctx.SendEmpty(204); return; }
+
+            Dictionary<string, object> reply = new Dictionary<string, object>();
+            reply["sessionId"] = _sessions.CurrentSessionId;
+            Dictionary<string, object> accepted = new Dictionary<string, object>();
+            foreach (KeyValuePair<string, string> kv in tokens) accepted[kv.Key] = kv.Value;
+            reply["files"] = accepted;
+            ctx.SendJson(200, Json.Stringify(reply));
+        }
+
         private void SendEndpoint(HttpContext ctx)
         {
             string fileId, token;
             if (!ctx.Query.TryGetValue("fileId", out fileId) || !ctx.Query.TryGetValue("token", out token))
             { ctx.SendText(400, "Missing fileId/token"); return; }
+            UploadFile(ctx, fileId, token, false, null);
+        }
 
-            FileDto meta = _sessions.ValidateUpload(fileId, token);
+        private void UploadV2Endpoint(HttpContext ctx)
+        {
+            string sessionId, fileId, token;
+            if (!ctx.Query.TryGetValue("sessionId", out sessionId)
+                || !ctx.Query.TryGetValue("fileId", out fileId)
+                || !ctx.Query.TryGetValue("token", out token))
+            { ctx.SendText(400, "Missing parameters"); return; }
+            UploadFile(ctx, fileId, token, true, sessionId);
+        }
+
+        private void UploadFile(HttpContext ctx, string fileId, string token, bool v2, string sessionId)
+        {
+            FileDto meta = v2
+                ? _sessions.ValidateUpload(sessionId, fileId, token)
+                : _sessions.ValidateUpload(fileId, token);
             if (meta == null) { ctx.SendEmpty(403); return; }
             if (ctx.ContentLength < 0) { ctx.SendText(411, "Length Required"); return; }
 
@@ -142,6 +186,15 @@ namespace Localsend.Backend.Receiver
         private void CancelEndpoint(HttpContext ctx)
         {
             _sessions.Cancel();
+            ctx.SendEmpty(200);
+        }
+
+        private void CancelV2Endpoint(HttpContext ctx)
+        {
+            string sessionId;
+            if (!ctx.Query.TryGetValue("sessionId", out sessionId))
+            { ctx.SendText(400, "Missing sessionId"); return; }
+            _sessions.Cancel(sessionId);
             ctx.SendEmpty(200);
         }
 

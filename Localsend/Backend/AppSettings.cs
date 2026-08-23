@@ -20,7 +20,7 @@ namespace Localsend.Backend
 
         public static AppSettings LoadOrCreate()
         {
-            string dir = @"\My Documents\LocalSend";
+            string dir = GetDefaultDataDirectory();
             try { if (!Directory.Exists(dir)) Directory.CreateDirectory(dir); } catch { }
             string path = Path.Combine(dir, "config.json");
 
@@ -43,12 +43,40 @@ namespace Localsend.Backend
                 catch (Exception ex) { Log.Warn("settings load failed: " + ex.Message); }
             }
 
-            if (string.IsNullOrEmpty(s.Alias)) s.Alias = "WM6-" + IdGen.NewRandom().Substring(0, 4);
+            if (string.IsNullOrEmpty(s.Alias))
+            {
+                bool ce = false;
+                try { ce = Environment.OSVersion.Platform == PlatformID.WinCE; } catch { }
+                s.Alias = (ce ? "WM6-" : "LocalSend-") + IdGen.NewRandom().Substring(0, 4);
+            }
             if (string.IsNullOrEmpty(s.DownloadDir)) s.DownloadDir = dir;
             if (string.IsNullOrEmpty(s.Fingerprint)) s.Fingerprint = IdGen.NewRandom();
 
             s.Save();
             return s;
+        }
+
+        private static string GetDefaultDataDirectory()
+        {
+            try
+            {
+                if (Environment.OSVersion.Platform == PlatformID.WinCE)
+                    return @"\My Documents\LocalSend";
+            }
+            catch { }
+
+            // ApplicationData is available on both the desktop CLR and CF;
+            // use it for PC persistence and keep a current-directory fallback
+            // for locked-down or portable installations.
+            try
+            {
+                string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                if (!string.IsNullOrEmpty(appData))
+                    return Path.Combine(appData, "LocalSend-WinForms");
+            }
+            catch { }
+            try { return Path.Combine(Directory.GetCurrentDirectory(), "LocalSendData"); }
+            catch { return @"\My Documents\LocalSend"; }
         }
 
         public void Save()

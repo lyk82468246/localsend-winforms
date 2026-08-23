@@ -1,102 +1,149 @@
 # LocalSend 协议契约（本项目实现范围）
 
-目标平台：.NET Compact Framework 3.5 / Windows Mobile 6 Professional。
+协议基线：[LocalSend Protocol v2.2](https://github.com/localsend/protocol/blob/main/README.md)。本文件记录本项目在 .NET Compact Framework 3.5 和桌面 .NET Framework 3.5 上实际启用的字段与端点。
 
-由于 CF 3.5 无法做 HTTPS 服务端（`SslStream` 无 server 支持，WinCE SChannel 亦缺服务端绑定），**接收方只实现 v1 HTTP**；发送方可同时支持 v1（HTTP）与 v2（HTTPS 客户端）。
+## 传输与指纹
 
----
+| 项 | 值 |
+| --- | --- |
+| 多播组 | `224.0.0.167` |
+| 多播/REST 默认端口 | `53317` |
+| 协议 | `http` 或 `https` |
+| 版本 | `2.0` |
+| HTTPS 指纹 | 证书 DER 的 SHA-256 大写十六进制 |
+| HTTP 指纹 | 持久化随机字符串或 provider 身份指纹 |
 
-## 常量
+桌面 Windows 的 `https` 由 Schannel TLS 1.2 提供，并要求双向证书；客户端在握手后固定校验对端证书指纹。Windows CE 只有 Positron socket 适配器真正接入后才能宣告 HTTPS，否则保持 HTTP。详见 [TLS_ARCHITECTURE.md](TLS_ARCHITECTURE.md)。
 
-| 名称 | 值 | 说明 |
-|---|---|---|
-| 多播组 | `224.0.0.167` | LocalSend 约定 |
-| 多播端口 | `53317` | UDP |
-| REST 默认端口 | `53317` | TCP |
-| 协议声明（本端） | `"http"` | v1 明文 |
-| 版本声明（本端） | `"2.0"`（仅当宣称 v2 能力时）/ v1 不含 `version` |
-| 设备类型 | `"mobile"` | 固定 |
+## 发现
 
----
+### UDP announce
 
-## 发现（UDP 多播）
-
-### 我方发出的 announce
+启动和定时发送：
 
 ```json
 {
-  "alias": "WM6 Device",
+  "alias": "LocalSend",
+  "version": "2.0",
   "deviceModel": "Windows Mobile 6",
   "deviceType": "mobile",
-  "fingerprint": "<random string, per-session>",
-  "announcement": true,
-  "version": "2.0",
+  "fingerprint": "...",
   "port": 53317,
-  "protocol": "http",
+  "protocol": "https",
+  "download": false,
+  "announce": true
+}
+```
+
+本项目同时附带旧版项目使用的 `announcement` 布尔别名；接收时优先使用官方 `announce`，没有该字段才读取旧别名。收到 `announce=true` 后：
+
+1. 服务层按对端宣告的 scheme/port 发 `POST /api/localsend/v2/register`。
+2. 无法完成 HTTP 注册时，仍向 UDP 来源发送 `announce=false` 回复，兼容只实现 UDP 的客户端。
+
+### HTTP register
+
+```text
+POST /api/localsend/v2/register
+Content-Type: application/json
+```
+
+请求体是本端设备信息（不包 `announcement`）：
+
+```json
+{
+  "alias": "LocalSend",
+  "version": "2.0",
+  "deviceModel": "Windows",
+  "deviceType": "desktop",
+  "fingerprint": "...",
+  "port": 53317,
+  "protocol": "https",
   "download": false
 }
 ```
 
-- 启动时发一次 `"announcement": true`。
-- 收到他人 `"announcement": true` 时，**单播**（或多播）回一条 `"announcement": false` 作为 response。
-- `fingerprint` 作随机串（因为走 HTTP）；每次启动可重新生成，持久化到设置文件。
+响应是对端同形状的设备信息。v1 `/api/localsend/v1/register` 也映射到同一处理器。
 
-### 我方收到的 announce
+## 文件上传 API
 
-- v1 对端只有 `alias` / `deviceModel` / `deviceType` / `fingerprint` / `announcement`
-- v2 对端额外带 `version` / `port` / `protocol` / `download`
-- 若对端 `protocol == "https"`，我方作发送者时须用 `HttpWebRequest`（放行自签证书）。
+### v2.2 preparation
 
----
+```text
+POST /api/localsend/v2/prepare-upload
+```
 
-## REST（接收端实现 v1）
-
-Base URL: `http://<ip>:53317`
-
-### `GET /api/localsend/v1/info`
-返回设备信息 JSON（与 announce 同字段，去掉 `announcement`）。
-
-### `POST /api/localsend/v1/send-request`
 请求体：
+
 ```json
 {
-  "info": { "alias": "...", "deviceModel": "...", "deviceType": "...", "fingerprint": "..." },
+  "info": { "alias": "...", "version": "2.0", "fingerprint": "...", "port": 53317, "protocol": "https" },
   "files": {
-    "fileId1": { "id": "fileId1", "fileName": "...", "size": 123, "fileType": "image|video|pdf|text|other", "preview": null }
+    "file-id": {
+      "id": "file-id",
+      "fileName": "image.png",
+      "size": 1234,
+      "fileType": "image/png",
+      "preview": null
+    }
   }
 }
 ```
-响应（接收）：
+
+接收端按 `IReceivePolicy` 决定全部或部分文件。成功响应：
+
 ```json
-{ "fileId1": "token_for_fileId1", "fileId2": "token_for_fileId2" }
-```
-响应（拒绝）：HTTP 403 / 空 map。只允许**一个活动会话**；有会话在进行时返回 409。
-
-### `POST /api/localsend/v1/send?fileId=X&token=Y`
-请求体为**原始文件字节流**（非 multipart）。`Content-Length` 必须存在。校验 token 与 fileId 对应，写入文件，返回 200。
-
-### `POST /api/localsend/v1/cancel`
-取消当前会话，清理临时状态，返回 200。
-
----
-
-## 会话状态机（接收端）
-
-```
-Idle  --(send-request accepted)-->  Active{sessionId, tokens[fileId]→token, progress}
-Active --(all uploads complete)--> Idle
-Active --(/cancel)--> Idle
-Active --(timeout 5min no activity)--> Idle
+{
+  "sessionId": "session-id",
+  "files": { "file-id": "file-token" }
+}
 ```
 
-活动期间其他 `send-request` 返回 409。
+`204 No Content` 表示“无需传输”，发送端把它视为成功完成；`409` 表示已有活动会话，`403` 表示策略拒绝。
 
----
+### v2.2 upload
 
-## CF 3.5 实现注意
+```text
+POST /api/localsend/v2/upload?sessionId=session-id&fileId=file-id&token=file-token
+Content-Length: <size>
+Content-Type: application/octet-stream
+```
 
-- 无 `HttpListener` → 用 `TcpListener` 手写 HTTP/1.1。只需支持 `GET` / `POST`，`Content-Length` 主体，不需要 chunked（LocalSend 发送端有 Content-Length）。
-- 无内置 JSON → 手写解析器，仅覆盖 LocalSend 使用的子集。
-- 无 `async/await` → 每个 TCP 连接开一个 `ThreadPool` 工作项。
-- 无 `ConcurrentDictionary` → `lock` + `Dictionary`。
-- 文件写入大文件时分块读 socket，避免 `byte[]` 一次性驻留。
+请求体是原始文件字节流，不使用 multipart。接收端校验 session/file/token，流式写入下载目录，成功返回无 body 的 200。
+
+### v2.2 cancel
+
+```text
+POST /api/localsend/v2/cancel?sessionId=session-id
+```
+
+取消当前会话并清理 token。发送端在用户取消或上传失败时尽力调用该端点。
+
+## v1 兼容
+
+以下旧路径保持可用：
+
+- `GET /api/localsend/v1/info`
+- `POST /api/localsend/v1/send-request`
+- `POST /api/localsend/v1/send?fileId=...&token=...`
+- `POST /api/localsend/v1/cancel`
+- `POST /api/localsend/v1/register`
+
+v1 preparation 返回扁平的 `{ "fileId": "token" }`；只有在发现信息包含版本 `2.x` 时发送端才选择 v2 路径。
+
+## 会话状态机
+
+```text
+Idle --prepare/send-request accepted--> Active{sessionId,tokens,progress}
+Active --all files uploaded--> Idle
+Active --cancel or 5 min idle--> Idle
+Active --another preparation--> HTTP 409
+```
+
+同一时刻只允许一个接收会话；每个上传请求仍按 `Content-Length` 限长读取，避免把大文件一次性放入内存。
+
+## Compact Framework 约束
+
+- 不使用 `HttpListener`、`async/await` 或 `SslStream` 服务端。
+- `HttpServer` 基于 `TcpListener`，每条连接在线程池工作项中处理。
+- HTTP 客户端使用 `TcpClient` + `Stream`，HTTPS 时把已连接流交给 TLS provider。
+- Positron 不替代 HTTP parser；其 ABI 2 socket 适配器接入前，CE 服务继续是 HTTP。

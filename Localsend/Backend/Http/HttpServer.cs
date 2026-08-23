@@ -5,6 +5,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
+using Localsend.Backend.Tls;
 using Localsend.Backend.Util;
 
 namespace Localsend.Backend.Http
@@ -20,6 +21,10 @@ namespace Localsend.Backend.Http
         public long ContentLength = -1;
         public Stream Body;        // 限长度的请求体流
         public IPEndPoint Remote;
+        public bool IsTls;
+        public string PeerFingerprint;
+        public string TlsProtocol;
+        public string TlsCipherSuite;
 
         internal Stream _out;      // 响应写入目标
         private bool _sent;
@@ -54,11 +59,15 @@ namespace Localsend.Backend.Http
                 case 200: return "OK";
                 case 204: return "No Content";
                 case 400: return "Bad Request";
+                case 401: return "Unauthorized";
                 case 403: return "Forbidden";
                 case 404: return "Not Found";
                 case 405: return "Method Not Allowed";
                 case 409: return "Conflict";
+                case 411: return "Length Required";
                 case 413: return "Payload Too Large";
+                case 422: return "Unprocessable Entity";
+                case 429: return "Too Many Requests";
                 case 500: return "Internal Server Error";
                 default: return "OK";
             }
@@ -75,6 +84,8 @@ namespace Localsend.Backend.Http
     internal sealed class HttpServer : IDisposable
     {
         private readonly int _port;
+        private readonly ITlsProvider _tlsProvider;
+        private readonly bool _tlsEnabled;
         private TcpListener _listener;
         private Thread _acceptThread;
         private volatile bool _running;
@@ -83,7 +94,16 @@ namespace Localsend.Backend.Http
 
         private sealed class Route { public string Method; public string Path; public HttpHandler Handler; }
 
-        public HttpServer(int port) { _port = port; }
+        public HttpServer(int port) : this(port, null, false) { }
+
+        public HttpServer(int port, ITlsProvider tlsProvider, bool tlsEnabled)
+        {
+            _port = port;
+            _tlsProvider = tlsProvider;
+            _tlsEnabled = tlsEnabled && tlsProvider != null;
+        }
+
+        public bool TlsEnabled { get { return _tlsEnabled; } }
 
         public void Map(string method, string path, HttpHandler handler)
         {
@@ -107,7 +127,7 @@ namespace Localsend.Backend.Http
             _acceptThread.IsBackground = true;
             _acceptThread.Name = "LS-Http-Accept";
             _acceptThread.Start();
-            Log.Info("HTTP server listening on :" + _port);
+            Log.Info((_tlsEnabled ? "HTTPS" : "HTTP") + " server listening on :" + _port);
         }
 
         public void Stop()
@@ -136,12 +156,26 @@ namespace Localsend.Backend.Http
 
         private void HandleClient(TcpClient client)
         {
+            TlsSession tlsSession = null;
             try
             {
                 client.NoDelay = true;
                 NetworkStream ns = client.GetStream();
-                HttpContext ctx = ReadRequest(ns, (IPEndPoint)client.Client.RemoteEndPoint);
+                Stream requestStream = ns;
+                if (_tlsEnabled)
+                {
+                    tlsSession = _tlsProvider.Accept(ns);
+                    requestStream = tlsSession.Stream;
+                }
+                HttpContext ctx = ReadRequest(requestStream, (IPEndPoint)client.Client.RemoteEndPoint);
                 if (ctx == null) return;
+                if (tlsSession != null)
+                {
+                    ctx.IsTls = true;
+                    ctx.PeerFingerprint = tlsSession.PeerFingerprint;
+                    ctx.TlsProtocol = tlsSession.Protocol;
+                    ctx.TlsCipherSuite = tlsSession.CipherSuite;
+                }
 
                 Log.Info("HTTP " + ctx.Method + " " + ctx.RawPath + " from " + ctx.Remote
                     + " CL=" + ctx.ContentLength);
@@ -159,6 +193,7 @@ namespace Localsend.Backend.Http
             catch (Exception ex) { Log.Warn("Connection error: " + ex.Message); }
             finally
             {
+                try { if (tlsSession != null) tlsSession.Dispose(); } catch { }
                 try { client.Close(); } catch { }
             }
         }
@@ -178,7 +213,7 @@ namespace Localsend.Backend.Http
 
         // --- 请求解析 ---
 
-        private static HttpContext ReadRequest(NetworkStream ns, IPEndPoint remote)
+        private static HttpContext ReadRequest(Stream ns, IPEndPoint remote)
         {
             // 读到 \r\n\r\n 为止
             byte[] headerBuf = ReadUntilHeaderEnd(ns);
@@ -231,7 +266,7 @@ namespace Localsend.Backend.Http
             return ctx;
         }
 
-        private static byte[] ReadUntilHeaderEnd(NetworkStream ns)
+        private static byte[] ReadUntilHeaderEnd(Stream ns)
         {
             const int maxHeader = 16 * 1024;
             byte[] buf = new byte[maxHeader];

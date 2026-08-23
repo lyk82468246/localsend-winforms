@@ -1,6 +1,4 @@
 ﻿using System;
-using System.Linq;
-using System.Collections.Generic;
 using System.Windows.Forms;
 
 namespace Localsend
@@ -13,7 +11,19 @@ namespace Localsend
         [MTAThread]
         static void Main()
         {
-            Application.Run(new Form1());
+            try
+            {
+                Application.Run(new Form1());
+            }
+            catch (Exception ex)
+            {
+                // Keep startup/runtime failures from becoming the generic
+                // CLR 0xe0434352 application-error dialog.  TLS probing and
+                // optional Positron loading are best-effort; if a different
+                // unexpected error escapes the UI loop, report it plainly.
+                try { MessageBox.Show("LocalSend startup failed: " + ex.Message); }
+                catch { }
+            }
         }
     }
 }

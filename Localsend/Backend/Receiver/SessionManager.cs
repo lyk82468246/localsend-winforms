@@ -58,6 +58,11 @@ namespace Localsend.Backend.Receiver
         /// <summary>空闲或可启动新会话。</summary>
         public bool IsIdle { get { lock (_lock) { return _current == null; } } }
 
+        public string CurrentSessionId
+        {
+            get { lock (_lock) { return _current == null ? null : _current.Id; } }
+        }
+
         /// <summary>
         /// 尝试开启会话。
         /// 返回每个**接受的** fileId → token 的映射；拒绝的 fileId 不在结果中。
@@ -122,6 +127,19 @@ namespace Localsend.Backend.Receiver
             }
         }
 
+        public FileDto ValidateUpload(string sessionId, string fileId, string token)
+        {
+            lock (_lock)
+            {
+                if (_current == null || _current.Id != sessionId) return null;
+                string expect;
+                if (!_current.Tokens.TryGetValue(fileId, out expect)) return null;
+                if (expect != token) return null;
+                _current.LastActivityUtc = DateTime.UtcNow;
+                return _current.Files[fileId];
+            }
+        }
+
         /// <summary>标记单文件完成；若全部完成则关闭会话并触发事件。</summary>
         public void MarkCompleted(string fileId)
         {
@@ -146,6 +164,20 @@ namespace Localsend.Backend.Receiver
         {
             Session c;
             lock (_lock) { c = _current; _current = null; }
+            if (c != null) Log.Info("Session cancelled: " + c.Id);
+        }
+
+        public void Cancel(string sessionId)
+        {
+            Session c = null;
+            lock (_lock)
+            {
+                if (_current != null && _current.Id == sessionId)
+                {
+                    c = _current;
+                    _current = null;
+                }
+            }
             if (c != null) Log.Info("Session cancelled: " + c.Id);
         }
 

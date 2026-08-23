@@ -51,6 +51,9 @@ namespace Localsend.Backend
         public static string T(string key, object a, object b)
         { return string.Format(CultureInfo.InvariantCulture, T(key), a, b); }
 
+        public static string T(string key, params object[] args)
+        { return string.Format(CultureInfo.InvariantCulture, T(key), args); }
+
         private static string DetectDefault()
         {
             try
@@ -68,8 +71,8 @@ namespace Localsend.Backend
             Dictionary<string, string> zh = new Dictionary<string, string>();
 
             // window title
-            en["app.title"] = "LocalSend (WM)";
-            zh["app.title"] = "LocalSend (WM)";
+            en["app.title"] = "LocalSend";
+            zh["app.title"] = "LocalSend";
 
             // menu
             en["menu.send"] = "Send"; zh["menu.send"] = "发送";
@@ -90,7 +93,7 @@ namespace Localsend.Backend
 
             // status
             en["status.starting"] = "starting..."; zh["status.starting"] = "启动中...";
-            en["status.listening"] = "Listening on :{0}"; zh["status.listening"] = "监听中 :{0}";
+            en["status.listening"] = "Listening on {0}://:{1}"; zh["status.listening"] = "监听中 {0}://:{1}";
             en["status.ready"] = "Ready"; zh["status.ready"] = "就绪";
             en["status.preparing"] = "Preparing..."; zh["status.preparing"] = "准备...";
             en["status.uploading"] = "Uploading {0} {1}%"; zh["status.uploading"] = "上传 {0} {1}%";
@@ -110,8 +113,52 @@ namespace Localsend.Backend
             en["msg.filter"] = "All files|*.*"; zh["msg.filter"] = "所有文件|*.*";
 
             // about dialog
-            en["about.body"] = "LocalSend for WM6 v1.0\r\nAlias: {0}\r\nFingerprint: {1}\r\nPort: 53317";
-            zh["about.body"] = "LocalSend for WM6 v1.0\r\n别名: {0}\r\n指纹: {1}\r\n端口: 53317";
+            en["about.title"] = "About LocalSend"; zh["about.title"] = "关于 LocalSend";
+            en["about.application"] = "Application: LocalSend WinForms v1.0"; zh["about.application"] = "应用：LocalSend WinForms v1.0";
+            en["about.alias"] = "Alias: {0}"; zh["about.alias"] = "别名：{0}";
+            en["about.fingerprint"] = "Device fingerprint: {0}"; zh["about.fingerprint"] = "设备指纹：{0}";
+            en["about.port"] = "Port: {0}"; zh["about.port"] = "端口：{0}";
+            en["about.protocol"] = "Advertised protocol: {0}"; zh["about.protocol"] = "宣告协议：{0}";
+            en["about.environment"] = "Runtime environment"; zh["about.environment"] = "运行环境";
+            en["about.appVersion"] = "Assembly version: {0}"; zh["about.appVersion"] = "程序集版本：{0}";
+            en["about.os"] = "Operating system: {0}"; zh["about.os"] = "操作系统：{0}";
+            en["about.osVersion"] = "OS version: {0}"; zh["about.osVersion"] = "系统版本：{0}";
+            en["about.osBuild"] = "OS build: {0}"; zh["about.osBuild"] = "系统 Build：{0}";
+            en["about.processArch"] = "Process CPU: {0}"; zh["about.processArch"] = "进程 CPU：{0}";
+            en["about.nativeArch"] = "Native CPU: {0}"; zh["about.nativeArch"] = "系统 CPU：{0}";
+            en["about.pointerBits"] = "Pointer width: {0}"; zh["about.pointerBits"] = "指针宽度：{0}";
+            en["about.framework"] = "Framework: {0} {1}"; zh["about.framework"] = "框架：{0} {1}";
+            en["about.encryption"] = "Encryption capability"; zh["about.encryption"] = "加密能力";
+            en["about.provider"] = "TLS provider: {0}"; zh["about.provider"] = "TLS 提供者：{0}";
+            en["about.capability"] = "Status: {0}"; zh["about.capability"] = "状态：{0}";
+            en["about.transport"] = "HTTP TLS transport: {0}"; zh["about.transport"] = "HTTP TLS 传输：{0}";
+            en["about.transportReady"] = "available"; zh["about.transportReady"] = "可用";
+            en["about.transportUnavailable"] = "not connected"; zh["about.transportUnavailable"] = "尚未接入";
+            en["about.reason"] = "Reason: {0}"; zh["about.reason"] = "原因：{0}";
+            en["about.detail"] = "Diagnostic detail: {0}"; zh["about.detail"] = "诊断详情：{0}";
+            en["about.checked"] = "Last checked (UTC): {0}"; zh["about.checked"] = "最近探测（UTC）：{0}";
+            en["about.refresh"] = "Re-probe"; zh["about.refresh"] = "重新探测";
+            en["about.close"] = "Close"; zh["about.close"] = "关闭";
+            en["tls.capability.unavailable"] = "No encryption"; zh["tls.capability.unavailable"] = "完全无法加密";
+            en["tls.capability.receiveOnly"] = "May receive encrypted sends only"; zh["tls.capability.receiveOnly"] = "可能仅接受官方客户端的加密发送";
+            en["tls.capability.full"] = "Full encryption"; zh["tls.capability.full"] = "完全可以加密";
+            en["tls.providerPending"] = "The platform TLS provider is not connected yet."; zh["tls.providerPending"] = "平台 TLS 提供者尚未接入。";
+            en["tls.notProbed"] = "TLS capability has not been probed."; zh["tls.notProbed"] = "尚未探测 TLS 加密能力。";
+            en["tls.probeFailed"] = "TLS capability probe failed."; zh["tls.probeFailed"] = "TLS 加密能力探测失败。";
+            en["tls.providerDisposed"] = "TLS provider has been closed."; zh["tls.providerDisposed"] = "TLS 提供者已关闭。";
+            en["tls.systemApiMissing"] = "Windows Schannel API is unavailable."; zh["tls.systemApiMissing"] = "Windows Schannel API 不可用。";
+            en["tls.desktopOnly"] = "The Schannel provider is desktop-only."; zh["tls.desktopOnly"] = "Schannel 提供者仅适用于桌面 Windows。";
+            en["tls.ceOnly"] = "The Positron provider is Windows CE-only."; zh["tls.ceOnly"] = "Positron 提供者仅适用于 Windows CE。";
+            en["tls.ok"] = "TLS 1.2 and mutual certificate authentication are available."; zh["tls.ok"] = "TLS 1.2 与双向证书认证可用。";
+            en["tls.handshakeFailed"] = "TLS handshake failed."; zh["tls.handshakeFailed"] = "TLS 握手失败。";
+            en["tls.mutualAuthUnavailable"] = "TLS works, but mutual certificate authentication is unavailable."; zh["tls.mutualAuthUnavailable"] = "TLS 可用，但双向证书认证不可用。";
+            en["tls.positronDllMissing"] = "positron_tls.dll was not found or has the wrong processor architecture."; zh["tls.positronDllMissing"] = "找不到 positron_tls.dll，或处理器架构不匹配。";
+            en["tls.positronAbiInvalid"] = "positron_tls.dll does not expose a compatible ABI."; zh["tls.positronAbiInvalid"] = "positron_tls.dll 没有兼容的 ABI。";
+            en["tls.positronInitFailed"] = "Positron TLS initialization failed."; zh["tls.positronInitFailed"] = "Positron TLS 初始化失败。";
+            en["tls.positronAbiLegacy"] = "Only the legacy Positron TLS ABI was found; peer mTLS is unavailable."; zh["tls.positronAbiLegacy"] = "仅发现旧版 Positron TLS ABI，无法使用对等端双向认证。";
+
+            en["about.body"] = "LocalSend WinForms v1.0\r\nAlias: {0}\r\nFingerprint: {1}\r\nPort: 53317";
+            zh["about.body"] = "LocalSend WinForms v1.0\r\n别名: {0}\r\n指纹: {1}\r\n端口: 53317";
 
             _dicts[LangEn] = en;
             _dicts[LangZh] = zh;

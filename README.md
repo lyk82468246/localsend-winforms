@@ -1,4 +1,4 @@
-# LocalSend for Windows Mobile 6
+# LocalSend for Windows Mobile 6 / Windows desktop
 
 [中文](#中文) · [English](#english)
 
@@ -6,110 +6,72 @@
 
 ## 中文
 
-在 **Windows Mobile 6 Professional**（.NET Compact Framework 3.5）上"假装"成一个 LocalSend 对端：其他 LocalSend 客户端（Flutter 版 LocalSend on Android / iOS / Windows / macOS / Linux）在局域网里能自动发现这台 WM6 设备，并与它互相收发文件。
+这是一个面向 **Windows Mobile 6 / .NET Compact Framework 3.5** 的 LocalSend WinForms 实现，同时可以在安装了 .NET Framework 3.5 的 Windows XP 到 Windows 11 桌面系统上运行。它不依赖托管 `SslStream`：桌面端直接调用 Windows Schannel，HTTP 层只依赖普通 `Stream`，因此同一份 exe 可以在两类运行时中保持单文件部署。
 
-### 功能
-- UDP 多播发现（`224.0.0.167:53317`），在本机每个可用 IPv4 接口上同时 announce；DHCP/网卡变化自动收敛
-- HTTP 端点：`/api/localsend/v1/{info, send-request, send, cancel, register}`，附带 `/v2/{info, register}` 兼容
-- HTTP 注册（`/register`）兜底：当多播被路由器或 AP 隔离掉时，对端仍可通过 HTTP POST 把自己通告给本端
-- 接收到的文件保存到 `\My Documents\LocalSend\`（可在配置文件中修改）
-- 中英文界面实时切换
-- 应用内日志页 + 可选的文件日志（默认关闭）
-- 手动探测菜单：输入任意 IP:Port，做一次 TCP 连接 + HTTP GET /info 的连通性测试
+### 当前功能
+
+- UDP 多播发现（`224.0.0.167:53317`），在可用 IPv4 接口上 announce，并在收到 `announce=true` 后执行 v2.2 HTTP register；UDP 回复仍保留为兼容回退
+- LocalSend v1 与 v2.2 上传端点：`prepare-upload`、`upload`、`cancel`，以及旧版 `send-request`、`send`、`cancel`
+- 桌面 Windows 的 Schannel TLS 1.2：自签名 RSA-2048 身份、双向证书认证、证书 SHA-256 指纹固定
+- Windows Mobile 的 Positron TLS ABI 动态探测：缺失 DLL、架构不匹配、ABI 不兼容都会被捕获并转为可读状态，不会让进程发生系统级异常退出
+- “关于”窗体报告操作系统、进程/原生 CPU、指针宽度、运行时、TLS 提供者和三态加密能力
+- 中英文界面实时切换、日志页、可选文件日志、手动探测
+- 接收文件流式写入下载目录，不把整个文件读入内存
+
+### 加密能力三态
+
+启动时会针对当前环境运行探测，并在“关于”中显示：
+
+| 状态 | 含义 |
+| --- | --- |
+| 完全无法加密 | 只能宣告 HTTP；发送和接收均走明文 |
+| 可能接受官方客户端的加密发送 | 可以尝试作为 HTTPS 接收端，但不允许本端向 HTTPS 对端发送 |
+| 完全可以加密 | HTTPS 服务端和客户端均可用，发送时固定校验对端证书指纹 |
+
+桌面端通过 Schannel 的系统 API 动态探测，不会把 TLS DLL 静态打包进 exe。Windows XP 上 TLS 1.2 或双向证书能力可能不足，最终状态以运行时探测结果为准。Windows Mobile 端只有在正确位置找到适配当前 ARM 架构的 `positron_tls.dll` 时才会进入 Positron 分支；当前 Positron ABI 的 socket/listener 由 DLL 自己拥有，HTTP 流适配器仍需单独接入，因此无法接入时会安全地继续使用 HTTP。
+
+### 关于 Positron HTTP
+
+HTTP 不迁移到 Positron。Positron 负责 CE 上的 TLS/证书和（ABI 2）socket 生命周期；LocalSend 的 HTTP 解析、路由和文件流仍由本项目的 `TcpListener`/`Stream` 实现负责。这样桌面 Schannel 与未来的 Positron socket 适配器可以共用协议代码，也避免在 PC 上加载 ARM DLL。
 
 ### 安装与运行
-1. 在本仓库的 [Releases](https://github.com/lyk82468246/localsend-winforms/releases) 页下载最新 `Localsend.exe`
-2. 通过 ActiveSync / Windows Mobile Device Center 或存储卡，把 exe 复制到设备任意可写目录（建议 `\Program Files\Localsend\` 或 `\Storage Card\`）
-3. 在设备上双击运行；首次运行会在 `\My Documents\LocalSend\config.json` 生成配置（别名、指纹、下载目录等）
-4. 确保设备 Wi‑Fi 已经连入与对端设备**同一个子网的同一个 SSID**
 
-### ⚠️ 重要：对端必须关闭"加密"才能与 WM6 互通
+1. 在 VS2008 中安装 Windows Mobile 6 SDK 和 .NET Compact Framework 3.5。
+2. 打开 `Localsend.sln`，选择 `Debug|Any CPU` 或 `Release|Any CPU` 编译。
+3. WM6 设备上只复制 `Localsend.exe`（以及你选择部署的 `positron_tls.dll`）；桌面 Windows 直接运行 exe。
+4. 首次运行会在应用数据目录生成配置和 TLS 身份材料。桌面端证书为 DER 文件，私钥保存在当前用户的 CAPI 密钥容器 `LocalSend-WinForms-TLS` 中。
 
-WM6 的 .NET CF 3.5 与 WinCE SChannel **无法提供 HTTPS 服务端**，所以本端只能以 HTTP 方式工作。主流 LocalSend 客户端默认启用 HTTPS（v2 协议），你必须在对端关闭它：
+### 与官方客户端互通
 
-- **Android / iOS**：打开 LocalSend → 左下角"设置" → "网络" → 关闭 **"加密 (HTTPS)"** / **"Encryption"**
-- **Windows / macOS / Linux 桌面版**：LocalSend → 设置 → 网络 → 取消勾选 **"加密"** / **"Encryption"**
+本项目的协议实现以 [LocalSend Protocol v2.2](https://github.com/localsend/protocol/blob/main/README.md) 为准：HTTPS 模式使用证书 DER 的 SHA-256 指纹，v2 文件传输使用 `/api/localsend/v2/prepare-upload` 和 `/api/localsend/v2/upload`。HTTP 模式仍兼容 v1 客户端。
 
-关闭加密后，对端会以明文 HTTP 与 WM6 通信，发送/接收都能正常工作。
+如果“关于”显示“完全无法加密”，官方客户端必须关闭“加密/HTTPS”后才能与本端互传；如果显示“可能仅接受官方客户端的加密发送”，本端不会假装具备完整的发送能力，而会在发送前明确报告原因。
 
-> 若对端只能以 HTTPS 宣称自己，本端作为**发送方**会对任意证书放行（CF 3.5 的 `ICertificatePolicy`），但 TLS 握手能否成功取决于对端最低 TLS 版本——WM6 默认 TLS 1.0 / SSL3，许多现代 LocalSend 服务端只接受 TLS 1.2+，握手会失败。因此强烈建议**直接在对端关加密**。
+### 文件与诊断
 
-### 使用
-- **接收**：启动 WM6 端后保持应用在前台；在对端 LocalSend 里选中这台 WM6 设备（别名形如 `WM6-xxxx`），发送文件即可。文件落到 `\My Documents\LocalSend\`
-- **发送**：在 WM6 主界面选中列表里的对端 → 菜单 → 发送 → 选文件
-- **对端没出现在列表里**：菜单 → 探测... → 填入对端 IP 和端口（默认 53317）→ 确定；观察日志页
-
-### 菜单说明
-| 项 | 作用 |
-|---|---|
-| 发送 | 选中对端后发送文件 |
-| 刷新 | 手动刷新对端列表 |
-| 语言 | 中英文切换 |
-| 日志 | 查看最近 400 行内存日志 |
-| 持久日志 | 开关：把日志写到 `\My Documents\localsend.log` |
-| 探测... | 对指定 IP:Port 做连通性测试 |
-| 关于 | 显示本端别名、指纹、端口 |
-
-### 限制
-- 只实现了 LocalSend v1 的 HTTP 服务端；不支持 HTTPS 服务端（WM6 技术限制）
-- 单个接收会话（同一时刻只能接收一组文件，期间其他发送方收到 409）
-- 大文件通过流式写盘，不受内存限制；但 WM6 存储写速有限
-
-### 许可
-MIT。协议参考 [LocalSend 官方协议](https://github.com/localsend/protocol)。
+- WM6 默认下载目录：`\\My Documents\\LocalSend\\`
+- 桌面端配置和身份目录优先使用 `%APPDATA%\\LocalSend-WinForms`，不可写时回退到 exe 当前目录下的 `LocalSendData`
+- “关于”中的 `Reason` 和 `Diagnostic detail` 用于区分系统 Schannel 不可用、Positron DLL 缺失/架构错误、ABI 错误和实际握手失败
 
 ---
 
 ## English
 
-A drop‑in LocalSend peer running on **Windows Mobile 6 Professional** (.NET Compact Framework 3.5). Other LocalSend clients (Flutter LocalSend on Android / iOS / Windows / macOS / Linux) automatically discover the WM6 device on the LAN and exchange files with it.
+LocalSend for WinForms targets **Windows Mobile 6 / .NET Compact Framework 3.5** and also runs on Windows XP through Windows 11 when .NET Framework 3.5 is available. The HTTP layer is stream-based; desktop TLS is provided directly by Windows Schannel, so the executable does not need a managed TLS adapter DLL.
 
-### Features
-- UDP multicast discovery (`224.0.0.167:53317`), announcing simultaneously on every usable local IPv4 interface; DHCP / interface changes self‑converge
-- HTTP endpoints: `/api/localsend/v1/{info, send-request, send, cancel, register}`, plus `/v2/{info, register}` shims
-- HTTP registration (`/register`) fallback: when multicast is filtered by the router / AP isolation, peers can still POST their info over HTTP
-- Received files land in `\My Documents\LocalSend\` (configurable)
-- Live English / Chinese UI switch
-- In‑app log viewer + optional file log (off by default)
-- Manual Probe menu: enter any `IP:port` to run a TCP connect + HTTP GET /info reachability test
+### Highlights
 
-### Install & Run
-1. Download the latest `Localsend.exe` from [Releases](https://github.com/lyk82468246/localsend-winforms/releases)
-2. Copy it to the device (ActiveSync / WMDC / storage card) into any writable folder — `\Program Files\Localsend\` or `\Storage Card\` work
-3. Launch it; first run creates `\My Documents\LocalSend\config.json` (alias, fingerprint, download dir)
-4. Make sure the device's Wi‑Fi is on **the same SSID on the same subnet** as the peer
+- UDP discovery on `224.0.0.167:53317`, v2.2 HTTP registration after `announce=true`, and UDP fallback
+- LocalSend v1 and v2.2 upload APIs
+- Runtime-detected desktop Schannel TLS 1.2 with a self-signed RSA-2048 identity, mutual certificates, and SHA-256 certificate pinning
+- Safe late-bound Positron ABI probing on Windows CE; missing or wrong-architecture DLLs become an explicit capability status instead of a process crash
+- A scrollable About window with OS/CPU/runtime and the three-state encryption report
+- English / Chinese localization, logs, manual probe, and streaming file writes
 
-### ⚠️ Important: peers MUST turn off "Encryption" to talk to WM6
+### Encryption states
 
-.NET CF 3.5 + WinCE SChannel **cannot act as an HTTPS server**, so WM6 speaks plain HTTP only. Mainstream LocalSend clients default to HTTPS (v2 protocol); you have to disable it on the peer:
+The About window reports one of three states: no encryption, receive-only/possibly compatible with encrypted official sends, or full encryption. Desktop Schannel is probed at runtime. XP may report unavailable when its Schannel cannot provide the TLS 1.2 + mutual-certificate combination required by LocalSend. On Windows CE, `positron_tls.dll` must match the ARM processor and expose the expected ABI; the current ABI owns its sockets, so the HTTP stream adapter is intentionally kept as a separate integration step.
 
-- **Android / iOS**: LocalSend → Settings (bottom left) → Network → turn off **"Encryption (HTTPS)"**
-- **Windows / macOS / Linux desktop**: LocalSend → Settings → Network → uncheck **"Encryption"**
+HTTP is not replaced by a Positron HTTP implementation. The same HTTP parser and route handlers are used over plain `NetworkStream`, Schannel streams, and (when available) a future Positron socket adapter.
 
-With encryption off, peers fall back to plain HTTP and both send and receive work normally.
-
-> If a peer can only announce itself as HTTPS, WM6 as a **sender** will accept any cert (CF 3.5 `ICertificatePolicy`), but whether the TLS handshake succeeds depends on the peer's minimum TLS version. WM6 defaults to TLS 1.0 / SSL3; many modern LocalSend servers require TLS 1.2+ and will refuse. Turning off encryption on the peer is by far the simplest fix.
-
-### Usage
-- **Receive**: launch WM6 app and keep it foreground; from the peer's LocalSend, select this WM6 device (alias looks like `WM6-xxxx`) and send. Files arrive in `\My Documents\LocalSend\`
-- **Send**: on WM6, select a peer in the list → Menu → Send → pick a file
-- **Peer not in the list**: Menu → Probe... → enter the peer's IP and port (default 53317) → OK; watch the Log page
-
-### Menu
-| Item | What it does |
-|---|---|
-| Send | Send a file to the selected peer |
-| Refresh | Force peer list refresh |
-| Language | Toggle EN / 中文 |
-| Log | View the last 400 in‑memory log lines |
-| Log to file | Toggle writing log to `\My Documents\localsend.log` |
-| Probe... | Reachability test against a given `IP:port` |
-| About | Show local alias / fingerprint / port |
-
-### Limits
-- Only LocalSend v1 HTTP server is implemented; no HTTPS server (WM6 technical limitation)
-- One receive session at a time; concurrent senders get HTTP 409
-- Large files are streamed to disk so memory stays flat, but WM6 storage write throughput is modest
-
-### License
-MIT. Protocol reference: [LocalSend protocol](https://github.com/localsend/protocol).
+Build the solution with Visual Studio 2008 and the Windows Mobile 6 SDK. The protocol reference is [LocalSend Protocol v2.2](https://github.com/localsend/protocol/blob/main/README.md).

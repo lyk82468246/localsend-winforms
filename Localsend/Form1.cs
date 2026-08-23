@@ -6,7 +6,9 @@ using System.Text;
 using System.Windows.Forms;
 using Localsend.Backend;
 using Localsend.Backend.Receiver;
+using Localsend.Backend.Runtime;
 using Localsend.Backend.Sender;
+using Localsend.Backend.Tls;
 
 namespace Localsend
 {
@@ -14,6 +16,8 @@ namespace Localsend
     {
         private AppSettings _cfg;
         private LocalSendService _svc;
+        private readonly RuntimeEnvironmentInfo _environment;
+        private readonly TlsProviderRouter _tls;
 
         private Label _lblSelf;
         private ListBox _listPeers;
@@ -33,6 +37,8 @@ namespace Localsend
         public Form1()
         {
             InitializeComponent();
+            _environment = RuntimeEnvironmentInfo.Capture();
+            _tls = new TlsProviderRouter(_environment);
             BuildUi();
             this.Load += new EventHandler(OnLoad);
             this.Closed += new EventHandler(OnClosedForm);
@@ -104,7 +110,8 @@ namespace Localsend
                 _lblSelf.Text = I18n.T("status.starting");
 
             if (_svc != null)
-                _status.Text = I18n.T("status.listening", Localsend.Backend.Protocol.Constants.RestPort);
+                _status.Text = I18n.T("status.listening", _svc.Protocol,
+                    Localsend.Backend.Protocol.Constants.RestPort);
             else
                 _status.Text = I18n.T("status.ready");
         }
@@ -117,7 +124,7 @@ namespace Localsend
                 if (!string.IsNullOrEmpty(_cfg.Language)) I18n.Current = _cfg.Language;
                 Localsend.Backend.Util.Log.FileLoggingEnabled = _cfg.LogToFile;
 
-                _svc = new LocalSendService(_cfg.Alias, _cfg.DownloadDir, null, _cfg.Fingerprint);
+                _svc = new LocalSendService(_cfg.Alias, _cfg.DownloadDir, null, _cfg.Fingerprint, _tls);
                 _svc.Peers.PeerListChanged += new EventHandler(OnPeerListChanged);
                 _svc.Sender.Progress += new EventHandler<SendProgressEventArgs>(OnSendProgress);
                 _svc.Start();
@@ -134,6 +141,7 @@ namespace Localsend
         private void OnClosedForm(object sender, EventArgs e)
         {
             try { if (_svc != null) _svc.Stop(); } catch { }
+            try { if (_tls != null) _tls.Dispose(); } catch { }
         }
 
         private void OnLanguageChanged(object sender, EventArgs e)
@@ -178,8 +186,18 @@ namespace Localsend
         private void OnAboutClick(object sender, EventArgs e)
         {
             string alias = _cfg != null ? _cfg.Alias : "";
-            string fp = _cfg != null ? _cfg.Fingerprint : "";
-            MessageBox.Show(I18n.T("about.body", alias, fp));
+            string fp = _svc != null ? _svc.Fingerprint
+                : (_cfg != null ? _cfg.Fingerprint : "");
+            string protocol = _svc != null ? _svc.Protocol
+                : Localsend.Backend.Protocol.Constants.ProtocolScheme;
+            AboutForm f = new AboutForm(
+                _environment,
+                _tls,
+                alias,
+                fp,
+                Localsend.Backend.Protocol.Constants.RestPort,
+                protocol);
+            f.ShowDialog();
         }
 
         private void OnExitClick(object sender, EventArgs e) { this.Close(); }

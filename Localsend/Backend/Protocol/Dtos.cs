@@ -49,8 +49,7 @@ namespace Localsend.Backend.Protocol
         }
     }
 
-    /// <summary>UDP 多播 announce 消息。本端只实现 v1 接收端，announce 按 v1 形状发出
-    /// （不含 version/port/protocol/download），以免 v2 客户端对我们使用 /v2/ 端点。</summary>
+    /// <summary>UDP 多播 announce 消息。附带完整 v2 设备字段；旧客户端会忽略未知字段。</summary>
     internal sealed class AnnounceMessage
     {
         public DeviceInfo Info;
@@ -58,7 +57,11 @@ namespace Localsend.Backend.Protocol
 
         public Dictionary<string, object> ToJson()
         {
-            Dictionary<string, object> o = Info.ToJson(false);
+            Dictionary<string, object> o = Info.ToJson(true);
+            // LocalSend v2.2 calls this field `announce`.  Keep the old
+            // project spelling as an additive compatibility alias so peers
+            // built from an earlier revision still answer our packets.
+            o["announce"] = Announcement;
             o["announcement"] = Announcement;
             return o;
         }
@@ -67,7 +70,10 @@ namespace Localsend.Backend.Protocol
         {
             AnnounceMessage m = new AnnounceMessage();
             m.Info = DeviceInfo.FromJson(o);
-            m.Announcement = JsonHelpers.AsBool(o, "announcement", true);
+            if (o != null && o.ContainsKey("announce"))
+                m.Announcement = JsonHelpers.AsBool(o, "announce", true);
+            else
+                m.Announcement = JsonHelpers.AsBool(o, "announcement", true);
             return m;
         }
     }
@@ -78,7 +84,7 @@ namespace Localsend.Backend.Protocol
         public string Id;
         public string FileName;
         public long Size;
-        public string FileType; // image | video | pdf | text | other
+        public string FileType; // MIME type, for example image/png or application/pdf
         public string Preview;
 
         public Dictionary<string, object> ToJson()
