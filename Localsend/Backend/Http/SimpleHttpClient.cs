@@ -12,9 +12,9 @@ namespace Localsend.Backend.Http
 
     /// <summary>
     /// Small HTTP/1.1 client used by LocalSend so the request stream can be
-    /// wrapped by either Schannel or another TLS provider.  It deliberately
-    /// uses one request per TCP connection and Content-Length bodies only;
-    /// this is the subset required by the LocalSend v1/v2 file API.
+    /// wrapped by Schannel or supplied by an endpoint-oriented TLS provider.
+    /// It deliberately uses one request per connection and Content-Length
+    /// bodies only; this is the subset required by the LocalSend v1/v2 API.
     /// </summary>
     internal sealed class SimpleHttpClient
     {
@@ -74,24 +74,49 @@ namespace Localsend.Backend.Http
             int port = uri.Port;
             if (port <= 0) port = secure ? 443 : 80;
 
-            TcpClient client = new TcpClient();
+            TcpClient client = null;
             TlsSession tlsSession = null;
             Stream stream = null;
             try
             {
-                Connect(client, host, port);
-                client.NoDelay = true;
-                NetworkStream network = client.GetStream();
-                network.ReadTimeout = _readWriteTimeoutMs;
-                network.WriteTimeout = _readWriteTimeoutMs;
                 if (secure)
                 {
-                    if (_tls == null || !_tls.SupportsStreamTransport)
+                    if (_tls == null)
                         throw new InvalidOperationException("HTTPS peer requires a TLS provider");
-                    tlsSession = _tls.Connect(network, host, expectedFingerprint);
+                    ITlsEndpointProvider endpoint = _tls as ITlsEndpointProvider;
+                    if (endpoint != null && endpoint.SupportsEndpointTransport)
+                    {
+                        // Positron owns the CE socket and performs both the
+                        // TCP connect and TLS handshake inside its DLL.
+                        tlsSession = endpoint.ConnectPeer(
+                            host, port, expectedFingerprint, _connectTimeoutMs);
+                    }
+                    else
+                    {
+                        if (!_tls.SupportsStreamTransport)
+                            throw new InvalidOperationException(
+                                "HTTPS peer requires a TLS transport");
+                        client = new TcpClient();
+                        Connect(client, host, port);
+                        client.NoDelay = true;
+                        NetworkStream network = client.GetStream();
+                        network.ReadTimeout = _readWriteTimeoutMs;
+                        network.WriteTimeout = _readWriteTimeoutMs;
+                        tlsSession = _tls.Connect(
+                            network, host, expectedFingerprint);
+                    }
                     stream = tlsSession.Stream;
                 }
-                else stream = network;
+                else
+                {
+                    client = new TcpClient();
+                    Connect(client, host, port);
+                    client.NoDelay = true;
+                    NetworkStream network = client.GetStream();
+                    network.ReadTimeout = _readWriteTimeoutMs;
+                    network.WriteTimeout = _readWriteTimeoutMs;
+                    stream = network;
+                }
 
                 string pathAndQuery = uri.AbsolutePath;
                 if (string.IsNullOrEmpty(pathAndQuery)) pathAndQuery = "/";
@@ -124,12 +149,15 @@ namespace Localsend.Backend.Http
                     }
                 }
                 stream.Flush();
-                return ReadResponse(stream);
+                SimpleHttpResponse response = ReadResponse(stream);
+                if (tlsSession != null)
+                    response.PeerFingerprint = tlsSession.PeerFingerprint ?? "";
+                return response;
             }
             finally
             {
                 try { if (tlsSession != null) tlsSession.Dispose(); } catch { }
-                try { client.Close(); } catch { }
+                try { if (client != null) client.Close(); } catch { }
             }
         }
 
@@ -269,6 +297,8 @@ namespace Localsend.Backend.Http
         public int StatusCode;
         public Dictionary<string, string> Headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public byte[] Body = new byte[0];
+        /// <summary>Certificate SHA-256 learned from the TLS session.</summary>
+        public string PeerFingerprint = "";
 
         public string BodyText
         {

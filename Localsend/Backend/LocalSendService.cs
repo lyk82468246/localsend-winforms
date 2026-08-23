@@ -54,7 +54,7 @@ namespace Localsend.Backend
             _encryption = tls != null
                 ? tls.Report
                 : EncryptionCapabilityReport.NotProbed();
-            bool providerReady = tls != null && tls.SupportsStreamTransport
+            bool providerReady = tls != null && tls.SupportsHttpsTransport
                 && tls.Report.Level != EncryptionCapabilityLevel.Unavailable;
             _httpsEnabled = providerReady;
             _fullEncryption = providerReady
@@ -91,9 +91,9 @@ namespace Localsend.Backend
             _http = new HttpServer(Constants.RestPort,
                 _httpsEnabled ? tls.Provider : null, _httpsEnabled);
             if (tls != null && tls.Report.Level != EncryptionCapabilityLevel.Unavailable
-                && !tls.SupportsStreamTransport)
+                && !tls.SupportsHttpsTransport)
                 Log.Warn("TLS provider reported " + tls.Report.Level
-                    + " but has no HTTP stream adapter; staying on HTTP");
+                    + " but has no HTTP transport adapter; staying on HTTP");
             _v1 = new V1ApiHandler(_self, _sessions, policy, downloadDir, Peers);
             _v1.Register(_http);
 
@@ -189,6 +189,8 @@ namespace Localsend.Backend
                     try
                     {
                         DeviceInfo info = DeviceInfo.FromJson(Json.ParseObject(resp.BodyText));
+                        if (_httpsEnabled && !string.IsNullOrEmpty(resp.PeerFingerprint))
+                            info.Fingerprint = resp.PeerFingerprint;
                         Peers.Upsert(info, target);
                     }
                     catch (Exception parseEx)
@@ -224,7 +226,7 @@ namespace Localsend.Backend
         private void RegisterPeer(DeviceInfo peer, IPAddress address)
         {
             bool secure = string.Equals(peer.Protocol, "https", StringComparison.OrdinalIgnoreCase);
-            if (secure && (!_fullEncryption || _tls == null || !_tls.SupportsStreamTransport))
+            if (secure && (!_fullEncryption || _tls == null || !_tls.SupportsHttpsTransport))
             {
                 Log.Info("Discovery register skipped for HTTPS peer " + peer.Alias
                     + ": local runtime cannot send full TLS");
@@ -244,6 +246,8 @@ namespace Localsend.Backend
                 if (resp.StatusCode >= 200 && resp.StatusCode < 300)
                 {
                     DeviceInfo reply = DeviceInfo.FromJson(Json.ParseObject(resp.BodyText));
+                    if (secure && !string.IsNullOrEmpty(resp.PeerFingerprint))
+                        reply.Fingerprint = resp.PeerFingerprint;
                     Peers.Upsert(reply, address);
                     Log.Info("Discovery register succeeded: " + peer.Alias + " -> " + resp.StatusCode);
                 }

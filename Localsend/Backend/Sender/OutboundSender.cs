@@ -303,7 +303,7 @@ namespace Localsend.Backend.Sender
         private SimpleHttpClient CreateHttpClient(Peer peer)
         {
             bool secure = peer != null && peer.Protocol == "https";
-            if (secure && (!_fullEncryption || _tls == null || !_tls.SupportsStreamTransport))
+            if (secure && (!_fullEncryption || _tls == null || !_tls.SupportsHttpsTransport))
                 throw new IOException("Peer requires encrypted transport, but this device cannot send encrypted data");
             return new SimpleHttpClient(secure ? _tls.Provider : null, 15000, 60000);
         }

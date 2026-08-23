@@ -78,15 +78,18 @@ namespace Localsend.Backend.Http
     internal delegate void HttpHandler(HttpContext ctx);
 
     /// <summary>
-    /// 基于 TcpListener 手写的极简 HTTP/1.1 服务器。仅支持 Content-Length 请求体。
-    /// 每连接使用一个 ThreadPool 工作项。
+    /// 手写的极简 HTTP/1.1 服务器。桌面明文/Schannel 使用 TcpListener，
+    /// Positron ABI v2 使用其 endpoint listener；两者都仅支持 Content-Length
+    /// 请求体，每连接使用一个 ThreadPool 工作项。
     /// </summary>
     internal sealed class HttpServer : IDisposable
     {
         private readonly int _port;
         private readonly ITlsProvider _tlsProvider;
+        private readonly ITlsEndpointProvider _endpointProvider;
         private readonly bool _tlsEnabled;
         private TcpListener _listener;
+        private ITlsEndpointListener _endpointListener;
         private Thread _acceptThread;
         private volatile bool _running;
         private readonly object _routesLock = new object();
@@ -101,6 +104,11 @@ namespace Localsend.Backend.Http
             _port = port;
             _tlsProvider = tlsProvider;
             _tlsEnabled = tlsEnabled && tlsProvider != null;
+            _endpointProvider = tlsProvider as ITlsEndpointProvider;
+            if (_tlsEnabled && !_tlsProvider.SupportsStreamTransport
+                && (_endpointProvider == null || !_endpointProvider.SupportsEndpointTransport))
+                throw new InvalidOperationException(
+                    "TLS provider has no usable HTTP transport");
         }
 
         public bool TlsEnabled { get { return _tlsEnabled; } }
@@ -121,36 +129,102 @@ namespace Localsend.Backend.Http
         {
             if (_running) return;
             _running = true;
-            _listener = new TcpListener(IPAddress.Any, _port);
-            _listener.Start();
-            _acceptThread = new Thread(AcceptLoop);
-            _acceptThread.IsBackground = true;
-            _acceptThread.Name = "LS-Http-Accept";
-            _acceptThread.Start();
-            Log.Info((_tlsEnabled ? "HTTPS" : "HTTP") + " server listening on :" + _port);
+            try
+            {
+                if (_tlsEnabled && !_tlsProvider.SupportsStreamTransport
+                    && _endpointProvider != null)
+                {
+                    _endpointListener = _endpointProvider.Listen(_port, 15000);
+                }
+                else
+                {
+                    _listener = new TcpListener(IPAddress.Any, _port);
+                    _listener.Start();
+                }
+                _acceptThread = new Thread(AcceptLoop);
+                _acceptThread.IsBackground = true;
+                _acceptThread.Name = "LS-Http-Accept";
+                _acceptThread.Start();
+                Log.Info((_tlsEnabled ? "HTTPS" : "HTTP") + " server listening on :" + _port);
+            }
+            catch
+            {
+                _running = false;
+                try { if (_endpointListener != null) _endpointListener.Dispose(); } catch { }
+                _endpointListener = null;
+                try { if (_listener != null) _listener.Stop(); } catch { }
+                _listener = null;
+                throw;
+            }
         }
 
         public void Stop()
         {
             _running = false;
-            try { if (_listener != null) _listener.Stop(); } catch { }
+            TcpListener listener = _listener;
+            ITlsEndpointListener endpoint = _endpointListener;
+            Thread acceptThread = _acceptThread;
             _listener = null;
+            _endpointListener = null;
+            try { if (listener != null) listener.Stop(); } catch { }
+            try { if (endpoint != null) endpoint.Dispose(); } catch { }
+            try
+            {
+                if (acceptThread != null && acceptThread != Thread.CurrentThread)
+                    acceptThread.Join(5000);
+            }
+            catch { }
+            _acceptThread = null;
         }
 
         public void Dispose() { Stop(); }
 
         private void AcceptLoop()
         {
+            if (_endpointListener != null)
+            {
+                AcceptEndpointLoop(_endpointListener);
+                return;
+            }
             while (_running)
             {
                 TcpClient client;
-                try { client = _listener.AcceptTcpClient(); }
+                try
+                {
+                    TcpListener listener = _listener;
+                    if (listener == null) break;
+                    client = listener.AcceptTcpClient();
+                }
                 catch (SocketException) { if (_running) continue; else break; }
                 catch (InvalidOperationException) { break; }
 
                 TcpClient c = client;
                 try { Log.Info("HTTP accept from " + c.Client.RemoteEndPoint); } catch { }
                 ThreadPool.QueueUserWorkItem(delegate { HandleClient(c); });
+            }
+        }
+
+        private void AcceptEndpointLoop(ITlsEndpointListener endpoint)
+        {
+            while (_running)
+            {
+                TlsSession session = null;
+                IPEndPoint remote = null;
+                try { session = endpoint.Accept(out remote); }
+                catch (Exception ex)
+                {
+                    if (_running) Log.Warn("TLS accept failed: " + ex.Message);
+                    continue;
+                }
+                if (session == null)
+                {
+                    if (!_running) break;
+                    continue;
+                }
+                TlsSession accepted = session;
+                IPEndPoint peer = remote;
+                ThreadPool.QueueUserWorkItem(delegate
+                { HandleEndpointSession(accepted, peer); });
             }
         }
 
@@ -167,34 +241,53 @@ namespace Localsend.Backend.Http
                     tlsSession = _tlsProvider.Accept(ns);
                     requestStream = tlsSession.Stream;
                 }
-                HttpContext ctx = ReadRequest(requestStream, (IPEndPoint)client.Client.RemoteEndPoint);
-                if (ctx == null) return;
-                if (tlsSession != null)
-                {
-                    ctx.IsTls = true;
-                    ctx.PeerFingerprint = tlsSession.PeerFingerprint;
-                    ctx.TlsProtocol = tlsSession.Protocol;
-                    ctx.TlsCipherSuite = tlsSession.CipherSuite;
-                }
-
-                Log.Info("HTTP " + ctx.Method + " " + ctx.RawPath + " from " + ctx.Remote
-                    + " CL=" + ctx.ContentLength);
-
-                HttpHandler handler = FindRoute(ctx.Method, ctx.Path);
-                if (handler == null) { Log.Warn("HTTP 404 " + ctx.Method + " " + ctx.Path); ctx.SendText(404, "Not Found"); return; }
-
-                try { handler(ctx); }
-                catch (Exception ex)
-                {
-                    Log.Error("Handler threw", ex);
-                    try { ctx.SendText(500, "Internal Server Error"); } catch { }
-                }
+                ProcessRequest(requestStream, (IPEndPoint)client.Client.RemoteEndPoint,
+                    tlsSession);
             }
             catch (Exception ex) { Log.Warn("Connection error: " + ex.Message); }
             finally
             {
                 try { if (tlsSession != null) tlsSession.Dispose(); } catch { }
                 try { client.Close(); } catch { }
+            }
+        }
+
+        private void HandleEndpointSession(TlsSession tlsSession, IPEndPoint remote)
+        {
+            try { ProcessRequest(tlsSession.Stream, remote, tlsSession); }
+            catch (Exception ex) { Log.Warn("Connection error: " + ex.Message); }
+            finally { try { tlsSession.Dispose(); } catch { } }
+        }
+
+        private void ProcessRequest(Stream requestStream, IPEndPoint remote,
+            TlsSession tlsSession)
+        {
+            HttpContext ctx = ReadRequest(requestStream, remote);
+            if (ctx == null) return;
+            if (tlsSession != null)
+            {
+                ctx.IsTls = true;
+                ctx.PeerFingerprint = tlsSession.PeerFingerprint;
+                ctx.TlsProtocol = tlsSession.Protocol;
+                ctx.TlsCipherSuite = tlsSession.CipherSuite;
+            }
+
+            Log.Info("HTTP " + ctx.Method + " " + ctx.RawPath + " from " + ctx.Remote
+                + " CL=" + ctx.ContentLength);
+
+            HttpHandler handler = FindRoute(ctx.Method, ctx.Path);
+            if (handler == null)
+            {
+                Log.Warn("HTTP 404 " + ctx.Method + " " + ctx.Path);
+                ctx.SendText(404, "Not Found");
+                return;
+            }
+
+            try { handler(ctx); }
+            catch (Exception ex)
+            {
+                Log.Error("Handler threw", ex);
+                try { ctx.SendText(500, "Internal Server Error"); } catch { }
             }
         }
 

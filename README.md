@@ -13,7 +13,7 @@
 - UDP 多播发现（`224.0.0.167:53317`），在可用 IPv4 接口上 announce，并在收到 `announce=true` 后执行 v2.2 HTTP register；UDP 回复仍保留为兼容回退
 - LocalSend v1 与 v2.2 上传端点：`prepare-upload`、`upload`、`cancel`，以及旧版 `send-request`、`send`、`cancel`
 - 桌面 Windows 的 Schannel TLS 1.2：自签名 RSA-2048 身份、双向证书认证、证书 SHA-256 指纹固定
-- Windows Mobile 的 Positron TLS ABI 动态探测：缺失 DLL、架构不匹配、ABI 不兼容都会被捕获并转为可读状态，不会让进程发生系统级异常退出
+- Windows Mobile 的 Positron TLS ABI 动态探测和 socket/stream 适配：缺失 DLL、架构不匹配、ABI 不兼容都会被捕获并转为可读状态，不会让进程发生系统级异常退出
 - “关于”窗体报告操作系统、进程/原生 CPU、指针宽度、运行时、TLS 提供者和三态加密能力
 - 中英文界面实时切换、日志页、可选文件日志、手动探测
 - 接收文件流式写入下载目录，不把整个文件读入内存
@@ -28,11 +28,11 @@
 | 可能接受官方客户端的加密发送 | 可以尝试作为 HTTPS 接收端，但不允许本端向 HTTPS 对端发送 |
 | 完全可以加密 | HTTPS 服务端和客户端均可用，发送时固定校验对端证书指纹 |
 
-桌面端通过 Schannel 的系统 API 动态探测，不会把 TLS DLL 静态打包进 exe。Windows XP 上 TLS 1.2 或双向证书能力可能不足，最终状态以运行时探测结果为准。Windows Mobile 端只有在正确位置找到适配当前 ARM 架构的 `positron_tls.dll` 时才会进入 Positron 分支；当前 Positron ABI 的 socket/listener 由 DLL 自己拥有，HTTP 流适配器仍需单独接入，因此无法接入时会安全地继续使用 HTTP。
+桌面端通过 Schannel 的系统 API 动态探测，不会把 TLS DLL 静态打包进 exe。Windows XP 上 TLS 1.2 或双向证书能力可能不足，最终状态以运行时探测结果为准。Windows Mobile 端只有在正确位置找到适配当前 ARM 架构、且暴露完整 ABI v2 的 `positron_tls.dll` 时才会进入 Positron HTTPS 分支；Positron 自有 socket 会被映射到本项目的 HTTP `Stream` 契约，失败时安全地继续使用 HTTP。
 
 ### 关于 Positron HTTP
 
-HTTP 不迁移到 Positron。Positron 负责 CE 上的 TLS/证书和（ABI 2）socket 生命周期；LocalSend 的 HTTP 解析、路由和文件流仍由本项目的 `TcpListener`/`Stream` 实现负责。这样桌面 Schannel 与未来的 Positron socket 适配器可以共用协议代码，也避免在 PC 上加载 ARM DLL。
+HTTP 不迁移到 Positron。Positron 负责 CE 上的 TLS/证书和（ABI 2）socket 生命周期；LocalSend 的 HTTP 解析、路由和文件流仍由本项目负责，只在端点层把 Positron 的 `PTls_Read/Write` 映射为 `Stream`。这样桌面 Schannel 与 CE Positron 可以共用协议代码，也避免在 PC 上加载 ARM DLL。
 
 ### 安装与运行
 
@@ -64,14 +64,14 @@ LocalSend for WinForms targets **Windows Mobile 6 / .NET Compact Framework 3.5**
 - UDP discovery on `224.0.0.167:53317`, v2.2 HTTP registration after `announce=true`, and UDP fallback
 - LocalSend v1 and v2.2 upload APIs
 - Runtime-detected desktop Schannel TLS 1.2 with a self-signed RSA-2048 identity, mutual certificates, and SHA-256 certificate pinning
-- Safe late-bound Positron ABI probing on Windows CE; missing or wrong-architecture DLLs become an explicit capability status instead of a process crash
+- Safe late-bound Positron ABI probing and socket/stream adaptation on Windows CE; missing or wrong-architecture DLLs become an explicit capability status instead of a process crash
 - A scrollable About window with OS/CPU/runtime and the three-state encryption report
 - English / Chinese localization, logs, manual probe, and streaming file writes
 
 ### Encryption states
 
-The About window reports one of three states: no encryption, receive-only/possibly compatible with encrypted official sends, or full encryption. Desktop Schannel is probed at runtime. XP may report unavailable when its Schannel cannot provide the TLS 1.2 + mutual-certificate combination required by LocalSend. On Windows CE, `positron_tls.dll` must match the ARM processor and expose the expected ABI; the current ABI owns its sockets, so the HTTP stream adapter is intentionally kept as a separate integration step.
+The About window reports one of three states: no encryption, receive-only/possibly compatible with encrypted official sends, or full encryption. Desktop Schannel is probed at runtime. XP may report unavailable when its Schannel cannot provide the TLS 1.2 + mutual-certificate combination required by LocalSend. On Windows CE, `positron_tls.dll` must match the ARM processor and expose the complete ABI v2; its native socket endpoints are adapted to the shared HTTP stream contract at runtime.
 
-HTTP is not replaced by a Positron HTTP implementation. The same HTTP parser and route handlers are used over plain `NetworkStream`, Schannel streams, and (when available) a future Positron socket adapter.
+HTTP is not replaced by a Positron HTTP implementation. The same HTTP parser and route handlers are used over plain `NetworkStream`, Schannel streams, and Positron ABI v2 streams when the native endpoint is available.
 
 Build the solution with Visual Studio 2008 and the Windows Mobile 6 SDK. The protocol reference is [LocalSend Protocol v2.2](https://github.com/localsend/protocol/blob/main/README.md).

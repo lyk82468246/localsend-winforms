@@ -13,7 +13,7 @@
 | HTTPS 指纹 | 证书 DER 的 SHA-256 大写十六进制 |
 | HTTP 指纹 | 持久化随机字符串或 provider 身份指纹 |
 
-桌面 Windows 的 `https` 由 Schannel TLS 1.2 提供，并要求双向证书；客户端在握手后固定校验对端证书指纹。Windows CE 只有 Positron socket 适配器真正接入后才能宣告 HTTPS，否则保持 HTTP。详见 [TLS_ARCHITECTURE.md](TLS_ARCHITECTURE.md)。
+桌面 Windows 的 `https` 由 Schannel TLS 1.2 提供，并要求双向证书；客户端在握手后固定校验对端证书指纹。Windows CE 在发现 ABI v2 的 Positron socket 端点可用时，也会使用同一套 HTTP 路由；缺少 DLL、架构不匹配或 ABI 不完整时保持 HTTP。详见 [TLS_ARCHITECTURE.md](TLS_ARCHITECTURE.md)。
 
 ## 发现
 
@@ -144,6 +144,6 @@ Active --another preparation--> HTTP 409
 ## Compact Framework 约束
 
 - 不使用 `HttpListener`、`async/await` 或 `SslStream` 服务端。
-- `HttpServer` 基于 `TcpListener`，每条连接在线程池工作项中处理。
-- HTTP 客户端使用 `TcpClient` + `Stream`，HTTPS 时把已连接流交给 TLS provider。
-- Positron 不替代 HTTP parser；其 ABI 2 socket 适配器接入前，CE 服务继续是 HTTP。
+- `HttpServer` 在桌面明文/Schannel 路径基于 `TcpListener`，在 Positron ABI v2 路径基于 DLL 自有 listener；每条连接都在线程池工作项中处理。
+- HTTP 客户端使用 `TcpClient` + `Stream`；桌面 HTTPS 把已连接流交给 Schannel，CE HTTPS 由 Positron 自己建立 socket 后映射成同一个 `Stream` 契约。
+- Positron 不替代 HTTP parser；其 ABI 2 只负责 TLS、证书和 socket 生命周期，HTTP parser、路由和文件流仍由本项目共用。

@@ -1,12 +1,15 @@
 using System;
 using System.IO;
+using System.Net;
 using Localsend.Backend.Runtime;
 
 namespace Localsend.Backend.Tls
 {
     /// <summary>
     /// Transport-neutral TLS provider contract. Implementations own the
-    /// handshake and certificate material; HTTP only sees a Stream.
+    /// handshake and certificate material; HTTP normally sees a Stream.
+    /// Providers that own their native socket can additionally implement
+    /// ITlsEndpointProvider below.
     /// </summary>
     public interface ITlsProvider
     {
@@ -16,6 +19,27 @@ namespace Localsend.Backend.Tls
         EncryptionCapabilityReport Probe();
         TlsSession Connect(Stream transport, string targetName, string expectedFingerprint);
         TlsSession Accept(Stream transport);
+    }
+
+    /// <summary>
+    /// Optional endpoint-oriented TLS contract.  Some Compact Framework
+    /// providers (notably Positron on Windows CE) own the TCP socket inside
+    /// their native DLL and therefore cannot wrap an already-created
+    /// NetworkStream.  HTTP can use this contract without knowing the native
+    /// ABI or giving up the stream-oriented desktop provider.
+    /// </summary>
+    internal interface ITlsEndpointProvider
+    {
+        bool SupportsEndpointTransport { get; }
+        ITlsEndpointListener Listen(int port, int handshakeTimeoutMs);
+        TlsSession ConnectPeer(string host, int port, string expectedFingerprint,
+            int timeoutMs);
+    }
+
+    /// <summary>Accepted endpoint owned by a TLS provider.</summary>
+    internal interface ITlsEndpointListener : IDisposable
+    {
+        TlsSession Accept(out IPEndPoint remote);
     }
 
     /// <summary>Authenticated stream plus the identity learned during TLS.</summary>
@@ -54,8 +78,8 @@ namespace Localsend.Backend.Tls
 
     /// <summary>
     /// Chooses a provider only after the platform has been identified. The
-    /// concrete Schannel and Positron implementations can be added without
-    /// making the HTTP or UI layers depend on either one.
+    /// concrete Schannel and Positron implementations stay behind this
+    /// router, so HTTP and UI do not depend on either native ABI.
     /// </summary>
     public sealed class TlsProviderRouter
     {
@@ -81,6 +105,21 @@ namespace Localsend.Backend.Tls
         public bool SupportsStreamTransport
         {
             get { return _provider != null && _provider.SupportsStreamTransport; }
+        }
+
+        /// <summary>
+        /// True when HTTP can use either a stream-wrapping provider or an
+        /// endpoint provider whose native DLL owns the socket.
+        /// </summary>
+        public bool SupportsHttpsTransport
+        {
+            get
+            {
+                if (_provider == null) return false;
+                if (_provider.SupportsStreamTransport) return true;
+                ITlsEndpointProvider endpoint = _provider as ITlsEndpointProvider;
+                return endpoint != null && endpoint.SupportsEndpointTransport;
+            }
         }
 
         /// <summary>Current LocalSend identity fingerprint, when the provider has one.</summary>

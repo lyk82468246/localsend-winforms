@@ -135,8 +135,9 @@ namespace Localsend
                 : _tls.Report;
             sb.AppendLine(I18n.T("about.provider", report.Provider));
             sb.AppendLine(I18n.T("about.capability", CapabilityText(report.Level)));
-            sb.AppendLine(I18n.T("about.transport", _protocol == "https"
-                && _tls != null && _tls.SupportsStreamTransport
+            sb.AppendLine(I18n.T("about.transport", _tls != null
+                && _tls.Report.Level != EncryptionCapabilityLevel.Unavailable
+                && _tls.SupportsHttpsTransport
                 ? I18n.T("about.transportReady") : I18n.T("about.transportUnavailable")));
             sb.AppendLine(I18n.T("about.reason", I18n.T(report.ReasonCode)));
             if (!string.IsNullOrEmpty(report.Detail))
