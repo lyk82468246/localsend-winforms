@@ -40,6 +40,10 @@
 1. 服务层按对端宣告的 scheme/port 发 `POST /api/localsend/v2/register`。
 2. 无法完成 HTTP 注册时，仍向 UDP 来源发送 `announce=false` 回复，兼容只实现 UDP 的客户端。
 
+### 受限网络与生命周期兼容
+
+发现 socket 绑定失败不会被视为永久故障：服务会在后台短暂退避后重试，服务停止或加密模式切换时会取消旧的重试和 announce 定时器。发送 announce 时先按可用 IPv4 接口发送标准多播；如果网卡或接入点过滤 `224/4`，再尽力发送一次本地广播副本。广播副本只是兼容性补充，接收端仍按 fingerprint 去重。
+
 ### HTTP register
 
 ```text

@@ -35,8 +35,11 @@ namespace Localsend.Backend.Discovery
         private UdpClient _client;
         private Thread _rxThread;
         private Timer _announceTimer;
+        private Timer _bindRetryTimer;
         private volatile bool _running;
+        private bool _disposed;
 
+        private readonly object _lifecycleLock = new object();
         private readonly object _sendLock = new object();
         private readonly List<IPAddress> _joinedIfaces = new List<IPAddress>();
 
@@ -51,47 +54,80 @@ namespace Localsend.Backend.Discovery
 
         public void Start()
         {
-            if (_running) return;
-            _running = true;
-
-            try
+            lock (_lifecycleLock)
             {
-                _client = new UdpClient(_port);
-                Log.Info("UDP bound on *:" + _port);
+                if (_disposed || _running) return;
+                _running = true;
             }
-            catch (Exception ex)
+
+            if (!TryBindWithRetry())
             {
-                Log.Warn("Discovery UDP bind failed: " + ex.Message);
-                _running = false;
+                lock (_lifecycleLock) { _running = false; }
+                Log.Warn("Discovery UDP bind failed; will retry in the background");
+                ScheduleBindRetry();
+                return;
+            }
+            StopBindRetryTimer();
+
+            UdpClient client = _client;
+            if (client == null)
+            {
+                lock (_lifecycleLock) { _running = false; }
+                ScheduleBindRetry();
                 return;
             }
 
             try
             {
-                _client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 4);
+                client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 4);
                 Log.Info("Multicast TTL=4 set");
             }
             catch (Exception ex) { Log.Warn("Set MulticastTimeToLive failed: " + ex.Message); }
 
             // WM6 SChannel 不支持 MulticastLoopback 选项（WSAENOPROTOOPT），
             // 但 loopback 默认开启，这里静默尝试即可。
-            try { _client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastLoopback, true); }
+            try { client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastLoopback, true); }
             catch { }
 
-            // 首次同步接口列表（加入组）
-            RefreshInterfaces();
+            // 首次同步接口列表（加入组）。接口枚举在 WinCE 上可能因
+            // DNS/网卡栈暂时不可用而失败；这不应阻止后面的重试定时器。
+            try { RefreshInterfaces(); }
+            catch (Exception ex) { Log.Warn("Initial RefreshInterfaces threw: " + ex.Message); }
 
-            _rxThread = new Thread(RxLoop);
-            _rxThread.IsBackground = true;
-            _rxThread.Name = "LS-Discovery-Rx";
-            _rxThread.Start();
+            Thread rx = new Thread(RxLoop);
+            rx.IsBackground = true;
+            rx.Name = "LS-Discovery-Rx";
+            lock (_lifecycleLock)
+            {
+                if (_disposed || !_running)
+                {
+                    try { client.Close(); } catch { }
+                    return;
+                }
+                _rxThread = rx;
+                try { rx.Start(); }
+                catch
+                {
+                    _rxThread = null;
+                    throw;
+                }
+            }
 
+            try { SendAnnounce(true); }
+            catch (Exception ex) { Log.Warn("Initial announce failed: " + ex.Message); }
             try
             {
-                SendAnnounce(true);
-                _announceTimer = new Timer(delegate { SendAnnounce(true); }, null, 5000, 5000);
+                Timer timer = new Timer(delegate { SendAnnounce(true); }, null, 5000, 5000);
+                lock (_lifecycleLock)
+                {
+                    if (_disposed || !_running)
+                    {
+                        try { timer.Dispose(); } catch { }
+                    }
+                    else _announceTimer = timer;
+                }
             }
-            catch (Exception ex) { Log.Warn("Announce init failed: " + ex.Message); }
+            catch (Exception ex) { Log.Warn("Announce timer init failed: " + ex.Message); }
 
             Log.Info("Discovery started on " + _group + ":" + _port
                 + " self.fp=" + _self.Fingerprint + " self.alias=" + _self.Alias);
@@ -99,29 +135,144 @@ namespace Localsend.Backend.Discovery
 
         public void Stop()
         {
-            _running = false;
-            if (_announceTimer != null) { _announceTimer.Dispose(); _announceTimer = null; }
-            if (_client != null)
+            Timer announceTimer;
+            Timer bindRetryTimer;
+            Thread rxThread;
+            lock (_lifecycleLock)
             {
-                lock (_sendLock)
+                // A discovery instance belongs to one LocalSendService
+                // lifetime.  Mark it permanently stopped before cancelling
+                // the retry timer so a callback already in flight cannot
+                // resurrect the old socket after a service restart.
+                _disposed = true;
+                _running = false;
+                announceTimer = _announceTimer;
+                _announceTimer = null;
+                bindRetryTimer = _bindRetryTimer;
+                _bindRetryTimer = null;
+                rxThread = _rxThread;
+                _rxThread = null;
+            }
+            if (announceTimer != null) { try { announceTimer.Dispose(); } catch { } }
+            if (bindRetryTimer != null) { try { bindRetryTimer.Dispose(); } catch { } }
+
+            UdpClient client = null;
+            lock (_sendLock)
+            {
+                client = _client;
+                _client = null;
+                if (client != null)
                 {
                     for (int i = 0; i < _joinedIfaces.Count; i++)
                     {
                         try
                         {
-                            _client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.DropMembership,
+                            client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.DropMembership,
                                 new MulticastOption(_group, _joinedIfaces[i]));
                         }
                         catch { }
                     }
-                    _joinedIfaces.Clear();
                 }
-                try { _client.Close(); } catch { }
-                _client = null;
+                _joinedIfaces.Clear();
+            }
+            if (client != null)
+            {
+                try { client.Close(); } catch { }
+            }
+
+            if (rxThread != null && rxThread != Thread.CurrentThread)
+            {
+                try { rxThread.Join(2000); } catch { }
             }
         }
 
-        public void Dispose() { Stop(); }
+        public void Dispose()
+        {
+            lock (_lifecycleLock) { _disposed = true; }
+            Stop();
+        }
+
+        private bool TryBindWithRetry()
+        {
+            for (int attempt = 1; attempt <= 3; attempt++)
+            {
+                if (!_running || _disposed) return false;
+                UdpClient candidate = null;
+                lock (_sendLock)
+                {
+                    if (_client != null) return true;
+                }
+                try
+                {
+                    candidate = new UdpClient();
+                    try
+                    {
+                        candidate.Client.SetSocketOption(SocketOptionLevel.Socket,
+                            SocketOptionName.ReuseAddress, 1);
+                    }
+                    catch (Exception ex) { Log.Warn("UDP ReuseAddress unavailable: " + ex.Message); }
+                    try
+                    {
+                        candidate.Client.SetSocketOption(SocketOptionLevel.Socket,
+                            SocketOptionName.Broadcast, 1);
+                    }
+                    catch { }
+                    candidate.Client.Bind(new IPEndPoint(IPAddress.Any, _port));
+
+                    lock (_sendLock)
+                    {
+                        if (!_running || _disposed)
+                        {
+                            try { candidate.Close(); } catch { }
+                            return false;
+                        }
+                        _client = candidate;
+                        candidate = null;
+                    }
+                    Log.Info("UDP bound on *:" + _port + " (attempt " + attempt + ")");
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    if (candidate != null) try { candidate.Close(); } catch { }
+                    Log.Warn("Discovery UDP bind attempt " + attempt + " failed: " + ex.Message);
+                    if (attempt < 3)
+                    {
+                        try { Thread.Sleep(250); } catch { }
+                    }
+                }
+            }
+            return false;
+        }
+
+        private void ScheduleBindRetry()
+        {
+            lock (_lifecycleLock)
+            {
+                if (_disposed || _bindRetryTimer != null) return;
+                _bindRetryTimer = new Timer(delegate { RetryBind(); }, null, 2000, 3000);
+            }
+        }
+
+        private void StopBindRetryTimer()
+        {
+            Timer timer;
+            lock (_lifecycleLock)
+            {
+                timer = _bindRetryTimer;
+                _bindRetryTimer = null;
+            }
+            if (timer != null) try { timer.Dispose(); } catch { }
+        }
+
+        private void RetryBind()
+        {
+            lock (_lifecycleLock)
+            {
+                if (_disposed || _running) return;
+            }
+            Start();
+        }
 
         /// <summary>
         /// 重新枚举本机可用 IPv4 地址，同步多播组成员关系：
@@ -129,7 +280,8 @@ namespace Localsend.Backend.Discovery
         /// </summary>
         private void RefreshInterfaces()
         {
-            if (_client == null) return;
+            UdpClient client = _client;
+            if (client == null) return;
 
             List<IPAddress> current = GetLocalIPv4Addresses();
             List<IPAddress> usable = new List<IPAddress>();
@@ -142,6 +294,9 @@ namespace Localsend.Backend.Discovery
 
             lock (_sendLock)
             {
+                client = _client;
+                if (client == null) return;
+
                 // 退出已消失的接口
                 List<IPAddress> toDrop = new List<IPAddress>();
                 for (int i = 0; i < _joinedIfaces.Count; i++)
@@ -152,7 +307,7 @@ namespace Localsend.Backend.Discovery
                     IPAddress a = toDrop[i];
                     try
                     {
-                        _client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.DropMembership,
+                        client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.DropMembership,
                             new MulticastOption(_group, a));
                         Log.Info("Dropped multicast on iface " + a);
                     }
@@ -167,12 +322,28 @@ namespace Localsend.Backend.Discovery
                     if (ContainsAddr(_joinedIfaces, a)) continue;
                     try
                     {
-                        _client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.AddMembership,
+                        client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.AddMembership,
                             new MulticastOption(_group, a));
                         _joinedIfaces.Add(a);
                         Log.Info("Joined multicast " + _group + " on iface " + a);
                     }
                     catch (Exception ex) { Log.Warn("Join on " + a + " failed: " + ex.Message); }
+                }
+
+                // Some WinCE stacks do not return an address from
+                // Dns.GetHostEntry even though the interface is usable.  A
+                // wildcard membership lets the OS select the default
+                // interface and keeps receive discovery alive in that case.
+                if (_joinedIfaces.Count == 0)
+                {
+                    try
+                    {
+                        client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.AddMembership,
+                            new MulticastOption(_group, IPAddress.Any));
+                        _joinedIfaces.Add(IPAddress.Any);
+                        Log.Info("Joined multicast " + _group + " on default interface");
+                    }
+                    catch (Exception ex) { Log.Warn("Join on default interface failed: " + ex.Message); }
                 }
             }
         }
@@ -184,7 +355,9 @@ namespace Localsend.Backend.Discovery
             while (_running)
             {
                 byte[] data;
-                try { data = _client.Receive(ref remote); }
+                UdpClient client = _client;
+                if (client == null) break;
+                try { data = client.Receive(ref remote); }
                 catch (SocketException ex)
                 {
                     if (!_running) break;
@@ -250,7 +423,11 @@ namespace Localsend.Backend.Discovery
                 try
                 {
                     int n;
-                    lock (_sendLock) n = _client.Send(payload, payload.Length, new IPEndPoint(from.Address, _port));
+                    lock (_sendLock)
+                    {
+                        if (_client == null) return;
+                        n = _client.Send(payload, payload.Length, new IPEndPoint(from.Address, _port));
+                    }
                     Log.Info("TX reply unicast " + n + "B to " + from.Address + ":" + _port);
                 }
                 catch (Exception ex) { Log.Warn("Announce reply (unicast) failed: " + ex.Message); }
@@ -280,33 +457,68 @@ namespace Localsend.Backend.Discovery
         /// </summary>
         private void SendMulticastOnAllInterfaces(byte[] payload, string tag)
         {
-            if (_client == null) return;
             IPEndPoint dst = new IPEndPoint(_group, _port);
 
             lock (_sendLock)
             {
+                UdpClient client = _client;
+                if (client == null) return;
+                bool sent = false;
                 if (_joinedIfaces.Count == 0)
                 {
                     try
                     {
-                        int n = _client.Send(payload, payload.Length, dst);
+                        int n = client.Send(payload, payload.Length, dst);
                         Log.Info("TX " + tag + " (default iface) " + n + "B to " + _group + ":" + _port);
+                        sent = true;
                     }
                     catch (Exception ex) { Log.Warn("TX " + tag + " (default) failed: " + ex.Message); }
-                    return;
+                }
+                else
+                {
+                    for (int i = 0; i < _joinedIfaces.Count; i++)
+                    {
+                        IPAddress iface = _joinedIfaces[i];
+                        try
+                        {
+                            int n;
+                            if (iface.Equals(IPAddress.Any))
+                                n = client.Send(payload, payload.Length, dst);
+                            else
+                            {
+                                client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastInterface,
+                                    iface.GetAddressBytes());
+                                n = client.Send(payload, payload.Length, dst);
+                            }
+                            Log.Info("TX " + tag + " via " + iface + " " + n + "B");
+                            sent = true;
+                        }
+                        catch (Exception ex) { Log.Warn("TX " + tag + " via " + iface + " failed: " + ex.Message); }
+                    }
                 }
 
-                for (int i = 0; i < _joinedIfaces.Count; i++)
+                // A few access points filter 224/4 while allowing local
+                // broadcast.  Keep the standards-compliant multicast above,
+                // then send one best-effort broadcast copy as a compatibility
+                // fallback.  Duplicate packets are de-duplicated by the
+                // fingerprint-keyed PeerRegistry.
+                try
                 {
-                    IPAddress iface = _joinedIfaces[i];
+                    int n = client.Send(payload, payload.Length,
+                        new IPEndPoint(IPAddress.Broadcast, _port));
+                    Log.Info("TX " + tag + " broadcast " + n + "B");
+                    sent = true;
+                }
+                catch (Exception ex) { Log.Info("TX " + tag + " broadcast unavailable: " + ex.Message); }
+
+                if (!sent)
+                {
                     try
                     {
-                        _client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastInterface,
-                            iface.GetAddressBytes());
-                        int n = _client.Send(payload, payload.Length, dst);
-                        Log.Info("TX " + tag + " via " + iface + " " + n + "B");
+                        int n = client.Send(payload, payload.Length, dst);
+                        Log.Info("TX " + tag + " final default " + n + "B");
                     }
-                    catch (Exception ex) { Log.Warn("TX " + tag + " via " + iface + " failed: " + ex.Message); }
+                    catch (Exception ex) { Log.Warn("TX " + tag + " final default failed: " + ex.Message); }
                 }
             }
         }
@@ -316,18 +528,33 @@ namespace Localsend.Backend.Discovery
         /// </summary>
         public void SendUnicastAnnounce(IPAddress target)
         {
-            if (_client == null || target == null) return;
+            if (target == null) return;
             AnnounceMessage m = new AnnounceMessage();
             m.Info = _self;
             m.Announcement = true;
             byte[] payload = Encoding.UTF8.GetBytes(Json.Stringify(m.ToJson()));
+            UdpClient probe = null;
+            bool temporary = false;
             try
             {
                 int n;
-                lock (_sendLock) n = _client.Send(payload, payload.Length, new IPEndPoint(target, _port));
+                lock (_sendLock)
+                {
+                    probe = _client;
+                    if (probe == null)
+                    {
+                        probe = new UdpClient();
+                        temporary = true;
+                    }
+                    n = probe.Send(payload, payload.Length, new IPEndPoint(target, _port));
+                }
                 Log.Info("TX unicast probe " + n + "B to " + target + ":" + _port);
             }
             catch (Exception ex) { Log.Warn("Unicast probe send failed: " + ex.Message); }
+            finally
+            {
+                if (temporary && probe != null) try { probe.Close(); } catch { }
+            }
         }
 
         // ---- helpers ----
@@ -348,6 +575,24 @@ namespace Localsend.Backend.Discovery
                 }
             }
             catch (Exception ex) { Log.Warn("GetLocalIPv4Addresses failed: " + ex.Message); }
+            if (r.Count == 0)
+            {
+                try
+                {
+#pragma warning disable 0618
+                    IPHostEntry he = Dns.GetHostByName(Dns.GetHostName());
+#pragma warning restore 0618
+                    if (he != null && he.AddressList != null)
+                    {
+                        for (int i = 0; i < he.AddressList.Length; i++)
+                        {
+                            IPAddress a = he.AddressList[i];
+                            if (a != null && a.AddressFamily == AddressFamily.InterNetwork) r.Add(a);
+                        }
+                    }
+                }
+                catch (Exception ex) { Log.Warn("Legacy IPv4 lookup failed: " + ex.Message); }
+            }
             return r;
         }
 

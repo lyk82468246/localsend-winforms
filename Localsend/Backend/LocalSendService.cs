@@ -24,6 +24,7 @@ namespace Localsend.Backend
         private readonly TlsProviderRouter _tls;
         private readonly bool _httpsEnabled;
         private readonly bool _fullEncryption;
+        private readonly bool _encryptionEnabled;
         private readonly EncryptionCapabilityReport _encryption;
         private readonly object _registerLock = new object();
         private readonly System.Collections.Generic.Dictionary<string, DateTime> _lastRegisterUtc
@@ -39,6 +40,16 @@ namespace Localsend.Backend
         public string Protocol { get { return _self.Protocol; } }
         public EncryptionCapabilityReport Encryption { get { return _encryption; } }
         public bool CanSendEncrypted { get { return _fullEncryption; } }
+        public bool EncryptionEnabled { get { return _encryptionEnabled; } }
+        public bool CanToggleEncryption
+        {
+            get
+            {
+                return _tls != null
+                    && _tls.SupportsHttpsTransport
+                    && _encryption.Level == EncryptionCapabilityLevel.Full;
+            }
+        }
         public string DownloadDir { get; private set; }
 
         public LocalSendService(string alias, string downloadDir, IReceivePolicy policy)
@@ -49,6 +60,16 @@ namespace Localsend.Backend
 
         public LocalSendService(string alias, string downloadDir, IReceivePolicy policy,
             string fingerprint, TlsProviderRouter tls)
+            : this(alias, downloadDir, policy, fingerprint, tls, true) { }
+
+        /// <summary>
+        /// Creates the service with the user's preferred encryption mode.
+        /// A full provider honors the preference.  A receive-only provider
+        /// stays on HTTPS so it can still accept official encrypted sends,
+        /// but it does not claim outbound encrypted capability.
+        /// </summary>
+        public LocalSendService(string alias, string downloadDir, IReceivePolicy policy,
+            string fingerprint, TlsProviderRouter tls, bool encryptionEnabled)
         {
             _tls = tls;
             _encryption = tls != null
@@ -56,9 +77,11 @@ namespace Localsend.Backend
                 : EncryptionCapabilityReport.NotProbed();
             bool providerReady = tls != null && tls.SupportsHttpsTransport
                 && tls.Report.Level != EncryptionCapabilityLevel.Unavailable;
-            _httpsEnabled = providerReady;
-            _fullEncryption = providerReady
+            bool fullProvider = providerReady
                 && tls.Report.Level == EncryptionCapabilityLevel.Full;
+            _httpsEnabled = fullProvider ? encryptionEnabled : providerReady;
+            _encryptionEnabled = _httpsEnabled;
+            _fullEncryption = fullProvider && encryptionEnabled;
 
             _self = new DeviceInfo();
             _self.Alias = string.IsNullOrEmpty(alias) ? Constants.DefaultAlias : alias;

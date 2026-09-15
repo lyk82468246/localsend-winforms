@@ -82,6 +82,7 @@ namespace Localsend.Backend
             en["menu.log"] = "Log"; zh["menu.log"] = "日志";
             en["menu.logFile"] = "Log to file"; zh["menu.logFile"] = "持久日志";
             en["menu.probe"] = "Probe..."; zh["menu.probe"] = "探测...";
+            en["menu.encryption"] = "Encryption"; zh["menu.encryption"] = "加密";
             en["menu.exit"] = "Exit"; zh["menu.exit"] = "退出";
             en["menu.language"] = "Language"; zh["menu.language"] = "语言";
             en["menu.lang.en"] = "English"; zh["menu.lang.en"] = "English";
@@ -110,11 +111,13 @@ namespace Localsend.Backend
             en["msg.startFailed"] = "Start failed: {0}"; zh["msg.startFailed"] = "启动失败: {0}";
             en["msg.sendFailed"] = "Send failed: {0}"; zh["msg.sendFailed"] = "发送失败: {0}";
             en["msg.peerRejected"] = "Peer rejected: {0}"; zh["msg.peerRejected"] = "对端拒绝: {0}";
+            en["msg.encryptionRestartFailed"] = "Could not restart after changing encryption: {0}";
+            zh["msg.encryptionRestartFailed"] = "切换加密后无法重启服务：{0}";
             en["msg.filter"] = "All files|*.*"; zh["msg.filter"] = "所有文件|*.*";
 
             // about dialog
             en["about.title"] = "About LocalSend"; zh["about.title"] = "关于 LocalSend";
-            en["about.application"] = "Application: LocalSend WinForms v1.0"; zh["about.application"] = "应用：LocalSend WinForms v1.0";
+            en["about.application"] = "Application: LocalSend WinForms v2.0"; zh["about.application"] = "应用：LocalSend WinForms v2.0";
             en["about.alias"] = "Alias: {0}"; zh["about.alias"] = "别名：{0}";
             en["about.fingerprint"] = "Device fingerprint: {0}"; zh["about.fingerprint"] = "设备指纹：{0}";
             en["about.port"] = "Port: {0}"; zh["about.port"] = "端口：{0}";
@@ -157,8 +160,8 @@ namespace Localsend.Backend
             en["tls.positronInitFailed"] = "Positron TLS initialization failed."; zh["tls.positronInitFailed"] = "Positron TLS 初始化失败。";
             en["tls.positronAbiLegacy"] = "Only the legacy Positron TLS ABI was found; peer mTLS is unavailable."; zh["tls.positronAbiLegacy"] = "仅发现旧版 Positron TLS ABI，无法使用对等端双向认证。";
 
-            en["about.body"] = "LocalSend WinForms v1.0\r\nAlias: {0}\r\nFingerprint: {1}\r\nPort: 53317";
-            zh["about.body"] = "LocalSend WinForms v1.0\r\n别名: {0}\r\n指纹: {1}\r\n端口: 53317";
+            en["about.body"] = "LocalSend WinForms v2.0\r\nAlias: {0}\r\nFingerprint: {1}\r\nPort: 53317";
+            zh["about.body"] = "LocalSend WinForms v2.0\r\n别名: {0}\r\n指纹: {1}\r\n端口: 53317";
 
             _dicts[LangEn] = en;
             _dicts[LangZh] = zh;

@@ -15,6 +15,7 @@ namespace Localsend.Backend
         public string Fingerprint;
         public string Language;
         public bool LogToFile;
+        public bool EncryptionEnabled;
 
         private string _path;
 
@@ -25,6 +26,10 @@ namespace Localsend.Backend
             string path = Path.Combine(dir, "config.json");
 
             AppSettings s = new AppSettings();
+            // Encryption is on by default when the runtime can provide it.
+            // The service will ignore this value when the provider is not
+            // capable of full HTTPS.
+            s.EncryptionEnabled = true;
             s._path = path;
 
             if (File.Exists(path))
@@ -39,6 +44,7 @@ namespace Localsend.Backend
                     s.Fingerprint = JsonHelpers.AsString(o, "fingerprint");
                     s.Language = JsonHelpers.AsString(o, "language");
                     s.LogToFile = JsonHelpers.AsBool(o, "logToFile", false);
+                    s.EncryptionEnabled = JsonHelpers.AsBool(o, "encryptionEnabled", true);
                 }
                 catch (Exception ex) { Log.Warn("settings load failed: " + ex.Message); }
             }
@@ -89,6 +95,7 @@ namespace Localsend.Backend
                 o["fingerprint"] = Fingerprint;
                 o["language"] = Language;
                 o["logToFile"] = LogToFile;
+                o["encryptionEnabled"] = EncryptionEnabled;
                 using (StreamWriter w = new StreamWriter(_path, false, Encoding.UTF8))
                     w.Write(Json.Stringify(o));
             }

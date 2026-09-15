@@ -56,7 +56,20 @@ namespace Localsend.Backend.Sender
                     _peers[info.Fingerprint] = p;
                     changed = true;
                 }
-                else changed = false;
+                else
+                {
+                    // A fingerprint is stable across DHCP/interface changes,
+                    // so an existing peer can legitimately move to a new
+                    // address or advertise a different transport.  Notify
+                    // the UI for those updates too; otherwise the list can
+                    // keep a stale endpoint even though discovery succeeded.
+                    string nextProtocol = string.Equals(info.Protocol, "https", StringComparison.OrdinalIgnoreCase)
+                        ? "https" : "http";
+                    changed = !SameAddress(p.Address, addr)
+                        || p.Port != (info.Port > 0 ? info.Port : Constants.RestPort)
+                        || p.Protocol != nextProtocol
+                        || p.Alias != info.Alias;
+                }
 
                 p.Alias = info.Alias;
                 p.DeviceModel = info.DeviceModel;
@@ -70,6 +83,12 @@ namespace Localsend.Backend.Sender
             }
             if (changed && PeerListChanged != null)
                 try { PeerListChanged(this, EventArgs.Empty); } catch { }
+        }
+
+        private static bool SameAddress(IPAddress left, IPAddress right)
+        {
+            if (left == null || right == null) return left == right;
+            return left.Equals(right);
         }
 
         /// <summary>剔除长时间未见的对端。</summary>

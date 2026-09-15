@@ -9,6 +9,7 @@ using Localsend.Backend.Receiver;
 using Localsend.Backend.Runtime;
 using Localsend.Backend.Sender;
 using Localsend.Backend.Tls;
+using Localsend.Backend.Util;
 
 namespace Localsend
 {
@@ -31,6 +32,7 @@ namespace Localsend
         private MenuItem _miLog;
         private MenuItem _miLogFile;
         private MenuItem _miProbe;
+        private MenuItem _miEncryption;
         private MenuItem _miAbout;
         private MenuItem _miExit;
 
@@ -74,12 +76,14 @@ namespace Localsend
             _miLog = new MenuItem(); _miLog.Click += new EventHandler(OnLogClick);
             _miLogFile = new MenuItem(); _miLogFile.Click += new EventHandler(OnLogFileClick);
             _miProbe = new MenuItem(); _miProbe.Click += new EventHandler(OnProbeClick);
+            _miEncryption = new MenuItem(); _miEncryption.Click += new EventHandler(OnEncryptionClick);
             _miExit = new MenuItem(); _miExit.Click += new EventHandler(OnExitClick);
             _miMenu.MenuItems.Add(_miRefresh);
             _miMenu.MenuItems.Add(_miLang);
             _miMenu.MenuItems.Add(_miLog);
             _miMenu.MenuItems.Add(_miLogFile);
             _miMenu.MenuItems.Add(_miProbe);
+            _miMenu.MenuItems.Add(_miEncryption);
             _miMenu.MenuItems.Add(_miAbout);
             _miMenu.MenuItems.Add(_miExit);
 
@@ -102,6 +106,9 @@ namespace Localsend
             _miLog.Text = I18n.T("menu.log");
             _miLogFile.Text = I18n.T("menu.logFile") + (Localsend.Backend.Util.Log.FileLoggingEnabled ? " *" : "");
             _miProbe.Text = I18n.T("menu.probe");
+            _miEncryption.Text = I18n.T("menu.encryption");
+            _miEncryption.Enabled = _svc != null && _svc.CanToggleEncryption;
+            _miEncryption.Checked = _svc != null && _svc.EncryptionEnabled;
             _miExit.Text = I18n.T("menu.exit");
 
             if (_cfg != null)
@@ -124,10 +131,7 @@ namespace Localsend
                 if (!string.IsNullOrEmpty(_cfg.Language)) I18n.Current = _cfg.Language;
                 Localsend.Backend.Util.Log.FileLoggingEnabled = _cfg.LogToFile;
 
-                _svc = new LocalSendService(_cfg.Alias, _cfg.DownloadDir, null, _cfg.Fingerprint, _tls);
-                _svc.Peers.PeerListChanged += new EventHandler(OnPeerListChanged);
-                _svc.Sender.Progress += new EventHandler<SendProgressEventArgs>(OnSendProgress);
-                _svc.Start();
+                StartService();
 
                 ApplyTexts();
                 RefreshPeerList();
@@ -216,12 +220,56 @@ namespace Localsend
             ApplyTexts();
         }
 
+        private void OnEncryptionClick(object sender, EventArgs e)
+        {
+            if (_svc == null || !_svc.CanToggleEncryption || _cfg == null) return;
+
+            bool oldValue = _cfg.EncryptionEnabled;
+            _cfg.EncryptionEnabled = !oldValue;
+            _cfg.Save();
+            try
+            {
+                RestartService();
+            }
+            catch (Exception ex)
+            {
+                // Keep the last known working mode if a restart fails.
+                _cfg.EncryptionEnabled = oldValue;
+                _cfg.Save();
+                try { RestartService(); } catch { }
+                MessageBox.Show(I18n.T("msg.encryptionRestartFailed", ex.Message));
+            }
+            ApplyTexts();
+        }
+
         private void OnProbeClick(object sender, EventArgs e)
         {
             if (_svc == null) return;
             ProbeForm pf = new ProbeForm();
             if (pf.ShowDialog() == DialogResult.OK && pf.Address != null)
                 _svc.Probe(pf.Address, pf.Port);
+        }
+
+        private void StartService()
+        {
+            _svc = new LocalSendService(
+                _cfg.Alias, _cfg.DownloadDir, null, _cfg.Fingerprint, _tls,
+                _cfg.EncryptionEnabled);
+            _svc.Peers.PeerListChanged += new EventHandler(OnPeerListChanged);
+            _svc.Sender.Progress += new EventHandler<SendProgressEventArgs>(OnSendProgress);
+            _svc.Start();
+        }
+
+        private void RestartService()
+        {
+            LocalSendService old = _svc;
+            _svc = null;
+            if (old != null)
+            {
+                try { old.Stop(); } catch (Exception ex) { Log.Warn("Service stop during restart failed: " + ex.Message); }
+            }
+            StartService();
+            RefreshPeerList();
         }
 
         // ---- events from background ----
