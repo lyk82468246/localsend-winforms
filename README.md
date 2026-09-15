@@ -38,8 +38,12 @@ HTTP 不迁移到 Positron。Positron 负责 CE 上的 TLS/证书和（ABI 2）s
 
 1. 在 VS2008 中安装 Windows Mobile 6 SDK 和 .NET Compact Framework 3.5。
 2. 打开 `Localsend.sln`，选择 `Debug|Any CPU` 或 `Release|Any CPU` 编译。
-3. WM6 设备上只复制 `Localsend.exe`（以及你选择部署的 `positron_tls.dll`）；桌面 Windows 直接运行 exe。
+3. 桌面 Windows 只需运行 `Localsend.exe`。WM6 设备若要体验加密，必须同时下载发布包中的 `Localsend.exe` 和 `positron_tls.dll`，并把两个文件放在同一目录（或把 DLL 放到 Windows 可搜索路径）；只下载 exe 时仍可使用明文 HTTP。
 4. 首次运行会在应用数据目录生成配置和 TLS 身份材料。桌面端证书为 DER 文件，私钥保存在当前用户的 CAPI 密钥容器 `LocalSend-WinForms-TLS` 中。
+
+### 2.0 RC 发布包
+
+发布包提供一个单文件程序 `Localsend.exe` 和一个可选的 Windows Mobile TLS 组件 `positron_tls.dll`。PC 端不需要 DLL；WM6 端只有在同时部署这两个文件、且 DLL 与设备 ARM 架构及 ABI v2 匹配时才会启用 HTTPS。DLL 缺失或架构不匹配时，程序会在“关于”中显示原因并安全降级为 HTTP。
 
 ### 与官方客户端互通
 
@@ -75,3 +79,7 @@ The About window reports one of three states: no encryption, receive-only/possib
 HTTP is not replaced by a Positron HTTP implementation. The same HTTP parser and route handlers are used over plain `NetworkStream`, Schannel streams, and Positron ABI v2 streams when the native endpoint is available.
 
 Build the solution with Visual Studio 2008 and the Windows Mobile 6 SDK. The protocol reference is [LocalSend Protocol v2.2](https://github.com/localsend/protocol/blob/main/README.md).
+
+### 2.0 RC package
+
+The release package contains the single-file `Localsend.exe` plus the optional Windows Mobile TLS component `positron_tls.dll`. Desktop Windows needs only the exe. To use encryption on WM6, download both files and place them in the same directory (or put the DLL in another Windows DLL search path); a missing or wrong-architecture DLL is reported in About and safely falls back to HTTP.
