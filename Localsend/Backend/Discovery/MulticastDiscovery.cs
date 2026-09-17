@@ -36,6 +36,7 @@ namespace Localsend.Backend.Discovery
         private Thread _rxThread;
         private Timer _announceTimer;
         private Timer _bindRetryTimer;
+        private readonly List<Timer> _announceBurstTimers = new List<Timer>();
         private volatile bool _running;
         private bool _disposed;
 
@@ -79,8 +80,11 @@ namespace Localsend.Backend.Discovery
 
             try
             {
-                client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 4);
-                Log.Info("Multicast TTL=4 set");
+                // LocalSend discovery is link-local; match the official
+                // socket's TTL=1 so a routed/ICS interface cannot relay the
+                // same announce into another network and create duplicates.
+                client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 1);
+                Log.Info("Multicast TTL=1 set");
             }
             catch (Exception ex) { Log.Warn("Set MulticastTimeToLive failed: " + ex.Message); }
 
@@ -115,6 +119,13 @@ namespace Localsend.Backend.Discovery
 
             try { SendAnnounce(true); }
             catch (Exception ex) { Log.Warn("Initial announce failed: " + ex.Message); }
+            // Match the official discovery burst.  A single announce can be
+            // lost while an access point is still waking multicast delivery;
+            // the short 100/500/2000 ms retries also reduce the need for a
+            // user to press manual probe after either side starts.
+            ScheduleAnnounceBurst(100);
+            ScheduleAnnounceBurst(500);
+            ScheduleAnnounceBurst(2000);
             try
             {
                 Timer timer = new Timer(delegate { SendAnnounce(true); }, null, 5000, 5000);
@@ -137,6 +148,7 @@ namespace Localsend.Backend.Discovery
         {
             Timer announceTimer;
             Timer bindRetryTimer;
+            List<Timer> announceBurstTimers;
             Thread rxThread;
             lock (_lifecycleLock)
             {
@@ -150,11 +162,15 @@ namespace Localsend.Backend.Discovery
                 _announceTimer = null;
                 bindRetryTimer = _bindRetryTimer;
                 _bindRetryTimer = null;
+                announceBurstTimers = new List<Timer>(_announceBurstTimers);
+                _announceBurstTimers.Clear();
                 rxThread = _rxThread;
                 _rxThread = null;
             }
             if (announceTimer != null) { try { announceTimer.Dispose(); } catch { } }
             if (bindRetryTimer != null) { try { bindRetryTimer.Dispose(); } catch { } }
+            for (int i = 0; i < announceBurstTimers.Count; i++)
+                try { announceBurstTimers[i].Dispose(); } catch { }
 
             UdpClient client = null;
             lock (_sendLock)
@@ -452,6 +468,27 @@ namespace Localsend.Backend.Discovery
             SendMulticastOnAllInterfaces(payload, "announce(" + announcement + ")");
         }
 
+        private void ScheduleAnnounceBurst(int dueMs)
+        {
+            try
+            {
+                Timer timer = new Timer(delegate
+                {
+                    if (_running && !_disposed)
+                    {
+                        try { SendAnnounce(true); }
+                        catch (Exception ex) { Log.Warn("Announce burst failed: " + ex.Message); }
+                    }
+                }, null, dueMs, Timeout.Infinite);
+                lock (_lifecycleLock)
+                {
+                    if (_disposed || !_running) { try { timer.Dispose(); } catch { } }
+                    else _announceBurstTimers.Add(timer);
+                }
+            }
+            catch (Exception ex) { Log.Warn("Announce burst timer init failed: " + ex.Message); }
+        }
+
         /// <summary>
         /// 对每个已加入的接口切换 IP_MULTICAST_IF 后发送一次；没有任何接口时回退到默认接口一次。
         /// </summary>
@@ -558,6 +595,16 @@ namespace Localsend.Backend.Discovery
         }
 
         // ---- helpers ----
+
+        /// <summary>
+        /// Returns a snapshot of local IPv4 interfaces for staged discovery.
+        /// Keep this enumeration next to multicast interface handling so the
+        /// HTTP fallback uses the same Win32/Windows Mobile view of adapters.
+        /// </summary>
+        internal static List<IPAddress> GetLocalIPv4AddressesSnapshot()
+        {
+            return GetLocalIPv4Addresses();
+        }
 
         private static List<IPAddress> GetLocalIPv4Addresses()
         {

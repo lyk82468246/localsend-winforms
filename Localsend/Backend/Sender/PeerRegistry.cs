@@ -33,7 +33,12 @@ namespace Localsend.Backend.Sender
     public sealed class PeerRegistry
     {
         private readonly object _lock = new object();
-        private readonly Dictionary<string, Peer> _peers = new Dictionary<string, Peer>();
+        // Certificate fingerprints are hexadecimal and semantically
+        // case-insensitive.  Different TLS stacks may serialize the same
+        // SHA-256 value with upper- or lower-case letters; keep that from
+        // creating two UI entries for one device.
+        private readonly Dictionary<string, Peer> _peers =
+            new Dictionary<string, Peer>(StringComparer.OrdinalIgnoreCase);
 
         public event EventHandler PeerListChanged;
 

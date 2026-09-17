@@ -3,6 +3,7 @@ using System.IO;
 using System.Net;
 using System.Text;
 using System.Threading;
+using System.Collections.Generic;
 using Localsend.Backend.Discovery;
 using Localsend.Backend.Http;
 using Localsend.Backend.Protocol;
@@ -31,6 +32,11 @@ namespace Localsend.Backend
             = new System.Collections.Generic.Dictionary<string, DateTime>();
         private Timer _sessionTick;
         private Timer _peerExpireTick;
+        private Timer _discoveryFallbackTimer;
+        private volatile bool _discoveryConfirmed;
+        private volatile bool _subnetScanStarted;
+        private volatile bool _stopped;
+        private int _registerInFlight;
 
         public PeerRegistry Peers { get; private set; }
         public OutboundSender Sender { get; private set; }
@@ -133,6 +139,7 @@ namespace Localsend.Backend
 
         public void Start()
         {
+            _stopped = false;
             try { _http.Start(); }
             catch (Exception ex) { Log.Error("HTTP start failed", ex); throw; }
 
@@ -141,14 +148,29 @@ namespace Localsend.Backend
 
             _sessionTick = new Timer(delegate { _sessions.Tick(); }, null, 30000, 30000);
             _peerExpireTick = new Timer(delegate { Peers.ExpireOlderThan(TimeSpan.FromMinutes(2)); }, null, 30000, 30000);
+            // Multicast is only a hint.  Give the initial announce/response
+            // burst a moment, then use the official-style /24 HTTP fallback
+            // if no peer has completed a register exchange.
+            try
+            {
+                _discoveryFallbackTimer = new Timer(delegate { RunSubnetFallbackScan(); },
+                    null, 3500, 5000);
+            }
+            catch (Exception ex) { Log.Warn("Discovery fallback timer init failed: " + ex.Message); }
             Log.Info("LocalSendService started: alias=" + _self.Alias + " fp=" + _self.Fingerprint
                 + " protocol=" + _self.Protocol + " tls=" + _encryption.Level);
         }
 
         public void Stop()
         {
+            _stopped = true;
             if (_sessionTick != null) { _sessionTick.Dispose(); _sessionTick = null; }
             if (_peerExpireTick != null) { _peerExpireTick.Dispose(); _peerExpireTick = null; }
+            if (_discoveryFallbackTimer != null)
+            {
+                try { _discoveryFallbackTimer.Dispose(); } catch { }
+                _discoveryFallbackTimer = null;
+            }
             _discovery.Stop();
             _http.Stop();
         }
@@ -156,16 +178,16 @@ namespace Localsend.Backend
         public void Dispose() { Stop(); }
 
         /// <summary>
-        /// 手动探测目标 IP:port：
-        /// 1) 裸 TCP connect（验证 L3/L4 可达，剥离 HTTP 层）
-        /// 2) 若 port == RestPort：发一条单播 UDP announce + HTTP v2 register
+        /// 手动探测目标 IP:port。默认端口直接走协议请求：单播
+        /// announce + HTTP(S) v2 register。不能先做裸 TCP connect，
+        /// 因为 Positron 的 accept 在返回前就完成 TLS 握手，裸 connect
+        /// 会在服务端制造 EOF/WSAECONNRESET，并与真正的 TLS 请求竞争。
+        /// 非标准端口仍保留 TCP 连通性诊断。
         /// </summary>
         public void Probe(IPAddress target, int port)
         {
             if (target == null) return;
             Log.Info("Probe start -> " + target + ":" + port);
-
-            ThreadPool.QueueUserWorkItem(delegate { ProbeTcp(target, port); });
 
             if (port == Constants.RestPort)
             {
@@ -173,6 +195,8 @@ namespace Localsend.Backend
                 catch (Exception ex) { Log.Warn("Probe unicast announce threw: " + ex.Message); }
                 ThreadPool.QueueUserWorkItem(delegate { ProbeHttp(target, port); });
             }
+            else
+                ThreadPool.QueueUserWorkItem(delegate { ProbeTcp(target, port); });
         }
 
         /// <summary>兼容旧调用点：默认用 LocalSend 端口。</summary>
@@ -200,30 +224,63 @@ namespace Localsend.Backend
 
         private void ProbeHttp(IPAddress target, int port)
         {
+            ProbeHttp(target, port, false);
+        }
+
+        private void ProbeHttp(IPAddress target, int port, bool quiet)
+        {
             string scheme = _httpsEnabled ? "https" : "http";
             string url = scheme + "://" + target + ":" + port + Constants.ApiV2 + "/register";
             try
             {
                 SimpleHttpClient http = new SimpleHttpClient(
-                    _httpsEnabled ? _tls.Provider : null, 5000, 15000);
+                    _httpsEnabled ? _tls.Provider : null,
+                    quiet ? 800 : 5000, quiet ? 2500 : 15000);
                 SimpleHttpResponse resp = http.PostJson(url, Json.Stringify(_self.ToJson(true)), "");
+                // A v1 peer may not expose the v2 route.  Keep the staged
+                // scan useful for older official clients without changing the
+                // v2-first behavior for current peers.
+                if (resp.StatusCode == 404 || resp.StatusCode == 405 || resp.StatusCode == 501)
+                {
+                    url = scheme + "://" + target + ":" + port + Constants.ApiV1 + "/register";
+                    resp = http.PostJson(url, Json.Stringify(_self.ToJson(false)), "");
+                }
                 if (resp.StatusCode >= 200 && resp.StatusCode < 300)
                 {
+                    if (_httpsEnabled && string.IsNullOrEmpty(resp.PeerFingerprint))
+                    {
+                        if (!quiet) Log.Warn("Probe HTTPS register returned no peer certificate fingerprint: " + url);
+                        return;
+                    }
                     try
                     {
                         DeviceInfo info = DeviceInfo.FromJson(Json.ParseObject(resp.BodyText));
                         if (_httpsEnabled && !string.IsNullOrEmpty(resp.PeerFingerprint))
                             info.Fingerprint = resp.PeerFingerprint;
-                        Peers.Upsert(info, target);
+                        if (info != null && string.Equals(info.Fingerprint, _self.Fingerprint,
+                            StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!quiet) Log.Info("Probe register reached this device; ignored self");
+                        }
+                        else
+                        {
+                            Peers.Upsert(info, target);
+                            _discoveryConfirmed = true;
+                        }
                     }
                     catch (Exception parseEx)
-                    { Log.Warn("Probe register response parse failed: " + parseEx.Message); }
+                    { if (!quiet) Log.Warn("Probe register response parse failed: " + parseEx.Message); }
                 }
-                string body = resp.BodyText;
-                if (body != null && body.Length > 400) body = body.Substring(0, 400) + "...";
-                Log.Info("Probe HTTP register " + url + " -> " + resp.StatusCode + " body=" + body);
+                if (!quiet)
+                {
+                    string body = resp.BodyText;
+                    if (body != null && body.Length > 400) body = body.Substring(0, 400) + "...";
+                    Log.Info("Probe HTTP register " + url + " -> " + resp.StatusCode + " body=" + body);
+                }
+                else if (resp.StatusCode >= 200 && resp.StatusCode < 300)
+                    Log.Info("Discovery fallback register succeeded: " + target);
             }
-            catch (Exception ex) { Log.Warn("Probe HTTP " + url + " failed: " + ex.Message); }
+            catch (Exception ex) { if (!quiet) Log.Warn("Probe HTTP " + url + " failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -243,7 +300,12 @@ namespace Localsend.Backend
                     && (DateTime.UtcNow - last).TotalSeconds < 20) return;
                 _lastRegisterUtc[key] = DateTime.UtcNow;
             }
-            ThreadPool.QueueUserWorkItem(delegate { RegisterPeer(peer, address); });
+            Interlocked.Increment(ref _registerInFlight);
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try { RegisterPeer(peer, address); }
+                finally { Interlocked.Decrement(ref _registerInFlight); }
+            });
         }
 
         private void RegisterPeer(DeviceInfo peer, IPAddress address)
@@ -258,20 +320,38 @@ namespace Localsend.Backend
 
             int port = peer.Port > 0 ? peer.Port : Constants.RestPort;
             string scheme = secure ? "https" : "http";
-            string url = scheme + "://" + address + ":" + port + Constants.ApiV2 + "/register";
+            bool legacy = peer.Version != null && peer.Version.StartsWith("1.");
+            string api = legacy ? Constants.ApiV1 : Constants.ApiV2;
+            string url = scheme + "://" + address + ":" + port + api + "/register";
             try
             {
                 SimpleHttpClient http = new SimpleHttpClient(
                     secure ? _tls.Provider : null, 5000, 15000);
-                string expected = secure ? (peer.Fingerprint ?? "") : "";
+                // UDP discovery metadata is not authenticated.  The first
+                // HTTPS register therefore uses TOFU: complete TLS without a
+                // pin and learn the peer identity from the certificate on the
+                // response.  A known fingerprint is enforced by the normal
+                // file-transfer path after registration.
+                string expected = "";
                 SimpleHttpResponse resp = http.PostJson(
-                    url, Json.Stringify(_self.ToJson(true)), expected);
+                    url, Json.Stringify(_self.ToJson(!legacy)), expected);
                 if (resp.StatusCode >= 200 && resp.StatusCode < 300)
                 {
+                    if (secure && string.IsNullOrEmpty(resp.PeerFingerprint))
+                    {
+                        Log.Warn("Discovery HTTPS register returned no peer certificate fingerprint: " + url);
+                        return;
+                    }
                     DeviceInfo reply = DeviceInfo.FromJson(Json.ParseObject(resp.BodyText));
                     if (secure && !string.IsNullOrEmpty(resp.PeerFingerprint))
                         reply.Fingerprint = resp.PeerFingerprint;
-                    Peers.Upsert(reply, address);
+                    if (reply != null && !string.IsNullOrEmpty(reply.Fingerprint)
+                        && !string.Equals(reply.Fingerprint, _self.Fingerprint,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        Peers.Upsert(reply, address);
+                        _discoveryConfirmed = true;
+                    }
                     Log.Info("Discovery register succeeded: " + peer.Alias + " -> " + resp.StatusCode);
                 }
                 else
@@ -279,6 +359,116 @@ namespace Localsend.Backend
             }
             catch (Exception ex)
             { Log.Warn("Discovery register " + url + " failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// HTTP fallback for networks where multicast is filtered or the
+        /// Windows Mobile UDP stack only delivers packets to the sender's own
+        /// interface.  This mirrors LocalSend's staged discovery: enumerate
+        /// local IPv4 interfaces, scan each /24, and POST /register with the
+        /// current transport.  HTTPS scans use TOFU exactly like announce
+        /// driven registration; the TLS certificate fingerprint is learned
+        /// from the response and becomes the peer key.
+        /// </summary>
+        private void RunSubnetFallbackScan()
+        {
+            // Let an announce-driven register finish before competing for the
+            // same Positron native endpoint.  The timer remains periodic, so
+            // a failed register will still fall back to the subnet scan.
+            if (_stopped || _discoveryConfirmed || _subnetScanStarted
+                || _registerInFlight > 0) return;
+            if (_httpsEnabled && !_fullEncryption)
+            {
+                Log.Info("Discovery fallback HTTP scan skipped: local TLS runtime is receive-only");
+                _subnetScanStarted = true;
+                Timer receiveOnlyTimer = _discoveryFallbackTimer;
+                _discoveryFallbackTimer = null;
+                if (receiveOnlyTimer != null) try { receiveOnlyTimer.Dispose(); } catch { }
+                return;
+            }
+
+            List<IPAddress> local = MulticastDiscovery.GetLocalIPv4AddressesSnapshot();
+            List<IPAddress> targets = new List<IPAddress>();
+            for (int i = 0; i < local.Count; i++)
+            {
+                IPAddress iface = local[i];
+                if (iface == null || iface.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork
+                    || IsLoopback(iface) || IsLinkLocal(iface)) continue;
+                byte[] b = iface.GetAddressBytes();
+                if (b.Length != 4) continue;
+                for (int host = 1; host <= 254; host++)
+                {
+                    if (host == b[3]) continue;
+                    IPAddress target = new IPAddress(new byte[] { b[0], b[1], b[2], (byte)host });
+                    if (ContainsAddress(local, target)) continue;
+                    if (!ContainsAddress(targets, target)) targets.Add(target);
+                }
+            }
+
+            if (targets.Count == 0)
+            {
+                Log.Info("Discovery fallback HTTP scan skipped: no usable IPv4 interface");
+                return;
+            }
+
+            _subnetScanStarted = true;
+            Timer scanTimer = _discoveryFallbackTimer;
+            _discoveryFallbackTimer = null;
+            if (scanTimer != null) try { scanTimer.Dispose(); } catch { }
+            Log.Info("Discovery fallback HTTP scan started: targets=" + targets.Count
+                + " scheme=" + (_httpsEnabled ? "https" : "http"));
+            SubnetScanState state = new SubnetScanState();
+            state.Targets = targets;
+            // Positron serializes native endpoint operations behind its ABI
+            // gate.  A single worker avoids six managed threads waiting on
+            // one native lock on WM6; desktop transports can use a small
+            // bounded fan-out.
+            int workers = targets.Count < 6 ? targets.Count : 6;
+            if (_httpsEnabled && _tls != null && _tls.Provider != null
+                && string.Equals(_tls.Provider.Name, "positron", StringComparison.OrdinalIgnoreCase))
+                workers = 1;
+            for (int i = 0; i < workers; i++)
+                ThreadPool.QueueUserWorkItem(delegate(object s) { SubnetScanWorker((SubnetScanState)s); }, state);
+        }
+
+        private void SubnetScanWorker(SubnetScanState state)
+        {
+            while (!_stopped && !_discoveryConfirmed)
+            {
+                IPAddress target = null;
+                lock (state.Gate)
+                {
+                    if (state.NextIndex >= state.Targets.Count) return;
+                    target = state.Targets[state.NextIndex++];
+                }
+                ProbeHttp(target, Constants.RestPort, true);
+            }
+        }
+
+        private sealed class SubnetScanState
+        {
+            public readonly object Gate = new object();
+            public List<IPAddress> Targets;
+            public int NextIndex;
+        }
+
+        private static bool ContainsAddress(List<IPAddress> list, IPAddress value)
+        {
+            for (int i = 0; i < list.Count; i++)
+                if (list[i].Equals(value)) return true;
+            return false;
+        }
+
+        private static bool IsLoopback(IPAddress value)
+        {
+            byte[] b = value.GetAddressBytes();
+            return b.Length == 4 && b[0] == 127;
+        }
+
+        private static bool IsLinkLocal(IPAddress value)
+        {
+            byte[] b = value.GetAddressBytes();
+            return b.Length == 4 && b[0] == 169 && b[1] == 254;
         }
     }
 }

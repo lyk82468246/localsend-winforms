@@ -19,7 +19,8 @@ namespace Localsend.Backend.Http
         public Dictionary<string, string> Query = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, string> Headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public long ContentLength = -1;
-        public Stream Body;        // 限长度的请求体流
+        public bool IsChunked;
+        public Stream Body;        // Content-Length 限长流或 chunked 解码流
         public IPEndPoint Remote;
         public bool IsTls;
         public string PeerFingerprint;
@@ -79,8 +80,8 @@ namespace Localsend.Backend.Http
 
     /// <summary>
     /// 手写的极简 HTTP/1.1 服务器。桌面明文/Schannel 使用 TcpListener，
-    /// Positron ABI v2 使用其 endpoint listener；两者都仅支持 Content-Length
-    /// 请求体，每连接使用一个 ThreadPool 工作项。
+    /// Positron ABI v2 使用其 endpoint listener；请求体支持 Content-Length
+    /// 和 HTTP/1.1 chunked，每连接使用一个 ThreadPool 工作项。
     /// </summary>
     internal sealed class HttpServer : IDisposable
     {
@@ -351,7 +352,22 @@ namespace Localsend.Backend.Http
                 if (Parse.TryLong(cl, out n)) ctx.ContentLength = n;
             }
 
-            if (ctx.ContentLength > 0)
+            string transferEncoding;
+            if (ctx.Headers.TryGetValue("Transfer-Encoding", out transferEncoding)
+                && !string.IsNullOrEmpty(transferEncoding)
+                && transferEncoding.ToLower().IndexOf("chunked") >= 0)
+                ctx.IsChunked = true;
+
+            if (ctx.IsChunked)
+            {
+                // RFC 7230 gives chunked framing precedence over a conflicting
+                // Content-Length header.  The decoder exposes an EOF after
+                // the zero-size chunk, so handlers can stream without
+                // buffering the upload.
+                ctx.ContentLength = -1;
+                ctx.Body = new ChunkedReadStream(ns);
+            }
+            else if (ctx.ContentLength > 0)
                 ctx.Body = new LengthLimitedStream(ns, ctx.ContentLength);
             else
                 ctx.Body = new LengthLimitedStream(ns, 0);
@@ -467,6 +483,130 @@ namespace Localsend.Backend.Http
             int n = _inner.Read(buffer, offset, toRead);
             if (n > 0) _remaining -= n;
             return n;
+        }
+    }
+
+    /// <summary>
+    /// Decodes an HTTP/1.1 chunked request body while preserving streaming
+    /// behavior.  It intentionally accepts chunk extensions and trailers, but
+    /// applies strict CRLF/hex validation so malformed traffic cannot make a
+    /// handler consume bytes from the next request.
+    /// </summary>
+    internal sealed class ChunkedReadStream : Stream
+    {
+        private readonly Stream _inner;
+        private long _remainingInChunk;
+        private bool _needChunkTerminator;
+        private bool _finished;
+
+        public ChunkedReadStream(Stream inner) { _inner = inner; }
+
+        public override bool CanRead { get { return true; } }
+        public override bool CanSeek { get { return false; } }
+        public override bool CanWrite { get { return false; } }
+        public override long Length { get { return -1; } }
+        public override long Position { get { return 0; } set { throw new NotSupportedException(); } }
+        public override void Flush() { }
+        public override long Seek(long o, SeekOrigin s) { throw new NotSupportedException(); }
+        public override void SetLength(long v) { throw new NotSupportedException(); }
+        public override void Write(byte[] b, int o, int c) { throw new NotSupportedException(); }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (buffer == null) throw new ArgumentNullException("buffer");
+            if (offset < 0 || count < 0 || offset > buffer.Length - count)
+                throw new ArgumentOutOfRangeException();
+            if (count == 0 || _finished) return 0;
+
+            int total = 0;
+            while (total < count && !_finished)
+            {
+                if (_remainingInChunk == 0)
+                {
+                    if (_needChunkTerminator)
+                    {
+                        ReadRequiredByte('\r');
+                        ReadRequiredByte('\n');
+                        _needChunkTerminator = false;
+                    }
+
+                    string line = ReadAsciiLine();
+                    if (line == null) throw new IOException("Chunk size missing");
+                    int semi = line.IndexOf(';');
+                    string sizeText = semi >= 0 ? line.Substring(0, semi).Trim() : line.Trim();
+                    long size;
+                    if (!TryParseHex(sizeText, out size))
+                        throw new IOException("Invalid chunk size");
+                    if (size == 0)
+                    {
+                        ConsumeTrailers();
+                        _finished = true;
+                        break;
+                    }
+                    _remainingInChunk = size;
+                    _needChunkTerminator = true;
+                }
+
+                int toRead = (int)Math.Min((long)(count - total), _remainingInChunk);
+                int n = _inner.Read(buffer, offset + total, toRead);
+                if (n <= 0) throw new IOException("Chunk body ended early");
+                _remainingInChunk -= n;
+                total += n;
+            }
+            return total;
+        }
+
+        private void ReadRequiredByte(char expected)
+        {
+            int b = _inner.ReadByte();
+            if (b != (byte)expected)
+                throw new IOException("Invalid chunk terminator");
+        }
+
+        private string ReadAsciiLine()
+        {
+            StringBuilder sb = new StringBuilder();
+            while (sb.Length <= 8192)
+            {
+                int b = _inner.ReadByte();
+                if (b < 0) return null;
+                if (b == '\r')
+                {
+                    ReadRequiredByte('\n');
+                    return sb.ToString();
+                }
+                if (b == '\n') return sb.ToString();
+                sb.Append((char)b);
+            }
+            throw new IOException("Chunk header too large");
+        }
+
+        private void ConsumeTrailers()
+        {
+            while (true)
+            {
+                string line = ReadAsciiLine();
+                if (line == null) throw new IOException("Chunk trailers missing");
+                if (line.Length == 0) return;
+            }
+        }
+
+        private static bool TryParseHex(string text, out long value)
+        {
+            value = 0;
+            if (string.IsNullOrEmpty(text)) return false;
+            for (int i = 0; i < text.Length; i++)
+            {
+                char c = text[i];
+                int digit;
+                if (c >= '0' && c <= '9') digit = c - '0';
+                else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
+                else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
+                else return false;
+                if (value > (long.MaxValue - digit) / 16) return false;
+                value = value * 16 + digit;
+            }
+            return true;
         }
     }
 }

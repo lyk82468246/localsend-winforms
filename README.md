@@ -10,13 +10,14 @@
 
 ### 当前功能
 
-- UDP 多播发现（`224.0.0.167:53317`），在可用 IPv4 接口上 announce，并在收到 `announce=true` 后执行 v2.2 HTTP register；UDP 回复仍保留为兼容回退，绑定失败会自动重试，并对受限 WLAN 发送广播兼容副本
+- UDP 多播发现（`224.0.0.167:53317`），在可用 IPv4 接口上 announce，并在收到 `announce=true` 后执行 v2.2 HTTP register；启动 burst（100/500/2000ms）和无多播时的 `/24` HTTP(S) staged fallback 覆盖 AP 隔离、WM6 UDP 栈和启动时序问题；UDP 回复仍保留为兼容回退，绑定失败会自动重试，并对受限 WLAN 发送广播兼容副本
 - LocalSend v1 与 v2.2 上传端点：`prepare-upload`、`upload`、`cancel`，以及旧版 `send-request`、`send`、`cancel`
 - 桌面 Windows 的 Schannel TLS 1.2：自签名 RSA-2048 身份、双向证书认证、证书 SHA-256 指纹固定
 - Windows Mobile 的 Positron TLS ABI 动态探测和 socket/stream 适配：缺失 DLL、架构不匹配、ABI 不兼容都会被捕获并转为可读状态，不会让进程发生系统级异常退出
 - “关于”窗体报告操作系统、进程/原生 CPU、指针宽度、运行时、TLS 提供者和三态加密能力
 - 中英文界面实时切换、日志页、可选文件日志、手动探测，以及可持久化的加密开关
 - 接收文件流式写入下载目录，不把整个文件读入内存
+- HTTP 服务端同时接受 `Content-Length` 与官方流式客户端可能使用的 `Transfer-Encoding: chunked`
 
 ### 加密能力三态
 
@@ -50,6 +51,8 @@ HTTP 不迁移到 Positron。Positron 负责 CE 上的 TLS/证书和（ABI 2）s
 
 本项目的协议实现以 [LocalSend Protocol v2.2](https://github.com/localsend/protocol/blob/main/README.md) 为准：HTTPS 模式使用证书 DER 的 SHA-256 指纹，v2 文件传输使用 `/api/localsend/v2/prepare-upload` 和 `/api/localsend/v2/upload`。HTTP 模式仍兼容 v1 客户端。
 
+加密发现的第一条 HTTPS register 使用 TOFU：UDP announce 中的 fingerprint 只用于显示和去重，真正的 peer identity 取自 TLS 会话证书；后续文件请求才使用该证书指纹固定。若多播被网络设备过滤，启动约 3.5 秒后会自动扫描本机 IPv4 `/24` 并直接 POST register，不需要手动逐个输入对端地址。
+
 如果“关于”显示“完全无法加密”，官方客户端必须关闭“加密/HTTPS”后才能与本端互传；如果显示“可能仅接受官方客户端的加密发送”，本端不会假装具备完整的发送能力，而会在发送前明确报告原因。
 
 当“关于”显示“完全可以加密”时，菜单中的“加密”选项默认开启；关闭后本端会重启为 HTTP，并把选择保存到配置。能力不足时该选项保持禁用。
@@ -59,6 +62,7 @@ HTTP 不迁移到 Positron。Positron 负责 CE 上的 TLS/证书和（ABI 2）s
 - WM6 默认下载目录：`\\My Documents\\LocalSend\\`
 - 桌面端配置和身份目录优先使用 `%APPDATA%\\LocalSend-WinForms`，不可写时回退到 exe 当前目录下的 `LocalSendData`
 - “关于”中的 `Reason` 和 `Diagnostic detail` 用于区分系统 Schannel 不可用、Positron DLL 缺失/架构错误、ABI 错误和实际握手失败
+- 日志中若只有 `Ignored self-announce`，应继续查看是否出现 `Discovery fallback HTTP scan started`；若没有可用 IPv4 接口，扫描会在网络接口建立后周期性重试
 
 ---
 
@@ -68,12 +72,13 @@ LocalSend for WinForms targets **Windows Mobile 6 / .NET Compact Framework 3.5**
 
 ### Highlights
 
-- UDP discovery on `224.0.0.167:53317`, v2.2 HTTP registration after `announce=true`, and UDP fallback; bind failures retry automatically and a best-effort broadcast copy helps WLANs that filter multicast
+- UDP discovery on `224.0.0.167:53317`, v2.2 HTTP registration after `announce=true`, a 100/500/2000 ms startup burst, and staged `/24` HTTP(S) fallback when multicast is filtered; bind failures retry automatically and a best-effort broadcast copy helps WLANs that filter multicast
 - LocalSend v1 and v2.2 upload APIs
 - Runtime-detected desktop Schannel TLS 1.2 with a self-signed RSA-2048 identity, mutual certificates, and SHA-256 certificate pinning
 - Safe late-bound Positron ABI probing and socket/stream adaptation on Windows CE; missing or wrong-architecture DLLs become an explicit capability status instead of a process crash
 - A scrollable About window with OS/CPU/runtime and the three-state encryption report
 - English / Chinese localization, logs, manual probe, a persistent encryption toggle, and streaming file writes
+- HTTP server support for both `Content-Length` and `Transfer-Encoding: chunked` uploads
 
 ### Encryption states
 
@@ -82,6 +87,8 @@ The About window reports one of three states: no encryption, receive-only/possib
 When the status is full encryption, the Menu → Encryption item is enabled and on by default. Turning it off restarts the service in HTTP mode and persists the choice; the item remains disabled for the other capability states.
 
 HTTP is not replaced by a Positron HTTP implementation. The same HTTP parser and route handlers are used over plain `NetworkStream`, Schannel streams, and Positron ABI v2 streams when the native endpoint is available.
+
+The first encrypted discovery register uses TOFU: the UDP fingerprint is only discovery metadata; the peer identity is learned from the TLS certificate and is pinned for subsequent file requests. If multicast is filtered, the service scans each local IPv4 `/24` after startup and registers directly, so manual probing is not required.
 
 Build the solution with Visual Studio 2008 and the Windows Mobile 6 SDK. A WM6 device must have .NET Compact Framework 3.5 installed (for example `NETCFv35.wm.armv4i.cab`) before launching this build. The protocol reference is [LocalSend Protocol v2.2](https://github.com/localsend/protocol/blob/main/README.md).
 

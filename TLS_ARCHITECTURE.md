@@ -83,7 +83,7 @@ Positron ABI 2 的 listener/socket 生命周期由 DLL 持有。本项目通过 
 
 ## HTTP 与官方 v2.2
 
-本项目没有把 HTTP 迁移到 Positron。`HttpServer` 仍是一个小型 HTTP/1.1 实现，`SimpleHttpClient` 负责 PC/CF 共有的 Content-Length 请求；二者通过 `Stream` 或 endpoint 会话与 TLS 解耦。
+本项目没有把 HTTP 迁移到 Positron。`HttpServer` 仍是一个小型 HTTP/1.1 实现，`SimpleHttpClient` 负责 PC/CF 共有的 Content-Length 请求；服务端同时接受官方客户端可能使用的 `Transfer-Encoding: chunked` 上传，并把分块解码成流。二者通过 `Stream` 或 endpoint 会话与 TLS 解耦。
 
 已经对齐的关键路径：
 
@@ -94,8 +94,9 @@ Positron ABI 2 的 listener/socket 生命周期由 DLL 持有。本项目通过 
 - 旧版 v1 `/send-request`、`/send`、`/cancel` 仍保留
 - 多播字段使用官方 `announce`；同时发出旧版本项目使用的 `announcement` 别名
 - v2 `204` preparation response 被视为成功的“无需传输”，而不是拒绝
+- v2 upload 支持 Content-Length 和 chunked request body；chunked 上传按元数据大小做一致性检查（零字节/未声明大小除外）
 
-HTTPS peer 的所有客户端请求都使用 announce/register 中的证书指纹进行 pinning。不能完成完整 TLS 的本端不会把 HTTPS peer 改写成 HTTP，也不会绕过指纹检查来“试试看”。
+HTTPS peer 的文件请求使用已知证书指纹进行 pinning。发现阶段的第一条 HTTPS register 使用 TOFU（不预先 pin），成功握手后只把 TLS 会话证书指纹作为 peer identity；不会把 UDP/JSON 中未经认证的 fingerprint 当成证书事实。服务端收到 HTTPS register 时也要求 payload fingerprint 与客户端证书指纹一致，否则忽略该注册但正常返回自身信息。不能完成完整 TLS 的本端不会把 HTTPS peer 改写成 HTTP，也不会绕过指纹检查来“试试看”。
 
 当 discovery/register 请求本身使用 HTTPS 且原先没有 pin 时，`SimpleHttpClient` 会把 TLS 会话实际看到的 `PeerFingerprint` 回填到响应；LocalSend 随后按该证书指纹缓存对端，而不是信任 HTTPS JSON 中仅用于发现的随机字段。
 
@@ -110,6 +111,19 @@ HTTPS peer 的所有客户端请求都使用 announce/register 中的证书指�
 - 正式 `Program.Main` 还有最后一道 UI 线程保护；意外启动异常会显示普通错误信息，不落入通用 CLR `0xe0434352` 崩溃对话框。
 
 这意味着用户需要从 Positron 仓库下载或编译正确架构的 DLL，并放到可搜索目录；PC 用户则应检查系统 Schannel、证书密钥容器权限和本机安全策略。
+
+## Discovery 的两级路径与排错
+
+UDP 多播仍按官方端口 `224.0.0.167:53317` 工作，并在启动时发送立即包和 100/500/2000 ms 的短 burst，随后每 5 秒发送一次。收到 `announce=true` 后，服务层向来源的 `/api/localsend/v2/register`（v1 对端则使用 v1 路径）发起注册；HTTPS 注册不再先做裸 TCP connect，避免 Positron 把诊断连接记录为 `-0x7280` EOF 或 `WSAECONNRESET`。
+
+如果启动后约 3.5 秒仍没有任何成功的 register，服务会枚举本机 IPv4 接口并对每个 `/24` 的其它地址执行有限并发的 HTTP(S) register 扫描。这对应官方的 staged discovery fallback，专门覆盖 AP multicast isolation、Windows Mobile UDP 栈只回送本机、或网络接口刚刚建立的情况。日志中应能看到：
+
+```text
+Discovery fallback HTTP scan started: targets=...
+Discovery fallback register succeeded: <peer-ip>
+```
+
+若只看到 `Ignored self-announce` 而没有 `Peer announce`，说明多播包没有到达本机；这不再阻止发现，重点检查随后是否出现 fallback scan。若 TLS 能力为 `ReceiveOnly`，不会执行 HTTPS 主动扫描（该状态只能安全接收），需要安装完整 provider 才能从 WM6 主动发现并发送到加密对端。
 
 ## 构建与验证
 

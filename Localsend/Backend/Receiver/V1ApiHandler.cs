@@ -72,6 +72,24 @@ namespace Localsend.Backend.Receiver
                 return;
             }
 
+            // In HTTPS mode the certificate is the authenticated device
+            // identity.  Do not let a caller claim a different fingerprint in
+            // the JSON payload (the official server ignores such a register
+            // rather than adding a spoofed peer).  Still return our own info
+            // so a probing client can finish the HTTP exchange cleanly.
+            if (ctx.IsTls)
+            {
+                if (string.IsNullOrEmpty(ctx.PeerFingerprint)
+                    || !string.Equals(info.Fingerprint, ctx.PeerFingerprint,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    Log.Warn("Register TLS fingerprint mismatch from " + ctx.Remote
+                        + ": payload=" + info.Fingerprint + " cert=" + (ctx.PeerFingerprint ?? ""));
+                    ctx.SendJson(200, Json.Stringify(_self.ToJson(true)));
+                    return;
+                }
+            }
+
             IPAddress src = ctx.Remote != null ? ctx.Remote.Address : IPAddress.Any;
             if (_peers != null) _peers.Upsert(info, src);
             Log.Info("Register: fp=" + info.Fingerprint + " alias=" + info.Alias
@@ -151,7 +169,8 @@ namespace Localsend.Backend.Receiver
                 ? _sessions.ValidateUpload(sessionId, fileId, token)
                 : _sessions.ValidateUpload(fileId, token);
             if (meta == null) { ctx.SendEmpty(403); return; }
-            if (ctx.ContentLength < 0) { ctx.SendText(411, "Length Required"); return; }
+            if (ctx.ContentLength < 0 && !ctx.IsChunked)
+            { ctx.SendText(411, "Length Required"); return; }
 
             string safeName = SanitizeFileName(meta.FileName);
             string fullPath = UniquePath(Path.Combine(_downloadDir, safeName));
@@ -162,14 +181,22 @@ namespace Localsend.Backend.Receiver
                 {
                     byte[] buf = new byte[16 * 1024];
                     long remaining = ctx.ContentLength;
-                    while (remaining > 0)
+                    long received = 0;
+                    while (ctx.IsChunked || remaining > 0)
                     {
-                        int toRead = (int)Math.Min(buf.Length, remaining);
+                        int toRead = ctx.IsChunked ? buf.Length : (int)Math.Min(buf.Length, remaining);
                         int n = ctx.Body.Read(buf, 0, toRead);
-                        if (n <= 0) throw new IOException("Stream ended early");
+                        if (n <= 0)
+                        {
+                            if (ctx.IsChunked) break;
+                            throw new IOException("Stream ended early");
+                        }
                         fs.Write(buf, 0, n);
-                        remaining -= n;
+                        received += n;
+                        if (!ctx.IsChunked) remaining -= n;
                     }
+                    if (ctx.IsChunked && meta.Size > 0 && received != meta.Size)
+                        throw new IOException("Chunked upload size mismatch");
                 }
                 _sessions.MarkCompleted(fileId);
                 ctx.SendEmpty(200);

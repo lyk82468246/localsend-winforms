@@ -164,14 +164,22 @@ namespace Localsend.Backend.Http
         private void Connect(TcpClient client, string host, int port)
         {
             IPAddress address = null;
-            IPHostEntry hostEntry = Dns.GetHostEntry(host);
-            IPAddress[] addresses = hostEntry == null ? new IPAddress[0] : hostEntry.AddressList;
-            for (int i = 0; i < addresses.Length; i++)
+            // Discovery and all LocalSend peer URLs use literal IPv4
+            // addresses.  Parsing them directly avoids a DNS round-trip (and
+            // a number of WinCE resolver failures) during a /24 scan.
+            try { address = IPAddress.Parse(host); } catch { }
+            IPAddress[] addresses = new IPAddress[0];
+            if (address == null)
             {
-                if (addresses[i] != null && addresses[i].AddressFamily == AddressFamily.InterNetwork)
-                { address = addresses[i]; break; }
+                IPHostEntry hostEntry = Dns.GetHostEntry(host);
+                addresses = hostEntry == null ? new IPAddress[0] : hostEntry.AddressList;
+                for (int i = 0; i < addresses.Length; i++)
+                {
+                    if (addresses[i] != null && addresses[i].AddressFamily == AddressFamily.InterNetwork)
+                    { address = addresses[i]; break; }
+                }
+                if (address == null && addresses.Length > 0) address = addresses[0];
             }
-            if (address == null && addresses.Length > 0) address = addresses[0];
             if (address == null) throw new IOException("Unable to resolve HTTP host");
 
             IAsyncResult ar = client.Client.BeginConnect(new IPEndPoint(address, port), null, null);
@@ -210,6 +218,10 @@ namespace Localsend.Backend.Http
                 response.Headers[name] = value;
             }
 
+            string transferEncoding;
+            bool chunked = response.Headers.TryGetValue("Transfer-Encoding", out transferEncoding)
+                && !string.IsNullOrEmpty(transferEncoding)
+                && transferEncoding.ToLower().IndexOf("chunked") >= 0;
             long length = -1;
             string cl;
             if (response.Headers.TryGetValue("Content-Length", out cl))
@@ -217,7 +229,16 @@ namespace Localsend.Backend.Http
                 try { length = long.Parse(cl); }
                 catch { length = -1; }
             }
-            if (length < 0)
+            if (chunked)
+            {
+                using (ChunkedReadStream decoded = new ChunkedReadStream(stream))
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    CopyToEnd(decoded, ms);
+                    response.Body = ms.ToArray();
+                }
+            }
+            else if (length < 0)
             {
                 using (MemoryStream ms = new MemoryStream())
                 {
